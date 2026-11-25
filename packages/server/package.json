@@ -1,0 +1,23 @@
+{
+  "name": "tchain",
+  "version": "0.1.0",
+  "description": "Local-first, AI-native ThoughtChain Decision Workbench CLI & server",
+  "type": "module",
+  "bin": {
+    "tchain": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "@tchain/core": "workspace:*",
+    "chokidar": "^4.0.3",
+    "commander": "^14.0.0",
+    "hono": "^4.7.0"
+  }
+}

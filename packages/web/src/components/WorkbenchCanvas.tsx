@@ -1,0 +1,374 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  MiniMap,
+  ReactFlow,
+  useReactFlow,
+  type Edge as RfEdge,
+  type Node as RfNode
+} from "@xyflow/react";
+import { projectGraph, type RenderGraph } from "@tchain/core";
+import { Info } from "lucide-react";
+import { runElkLayout, type LayoutResult } from "../layout/layoutClient.js";
+import { useWorkbenchStore } from "../store.js";
+import { CapsuleNode } from "./CapsuleNode.js";
+import { ContainerNode } from "./ContainerNode.js";
+import { ElkEdge } from "./ElkEdge.js";
+import { ExternalStubNode } from "./ExternalStubNode.js";
+import { ThoughtNode } from "./ThoughtNode.js";
+
+const nodeTypes = {
+  thought: ThoughtNode,
+  container: ContainerNode,
+  stub: ExternalStubNode,
+  capsule: CapsuleNode
+};
+
+const edgeTypes = {
+  elk: ElkEdge
+};
+
+export function WorkbenchCanvas() {
+  const graph = useWorkbenchStore((s) => s.graph);
+  const view = useWorkbenchStore((s) => s.view);
+  const drillRoot = useWorkbenchStore((s) => s.drillRoot);
+  const collapsed = useWorkbenchStore((s) => s.collapsedByView[s.view]);
+  const showDiscarded = useWorkbenchStore((s) => s.showDiscarded);
+  const showParked = useWorkbenchStore((s) => s.showParked);
+  const focusHideDimmed = useWorkbenchStore((s) => s.focusHideDimmed);
+  const dimCrossHierarchyEdges = useWorkbenchStore((s) => s.dimCrossHierarchyEdges);
+
+  const selectedNodeId = useWorkbenchStore((s) => s.selectedNodeId);
+  const hoveredNodeId = useWorkbenchStore((s) => s.hoveredNodeId);
+  const fitViewNonce = useWorkbenchStore((s) => s.fitViewNonce);
+
+  const selectNode = useWorkbenchStore((s) => s.selectNode);
+  const setHoveredNode = useWorkbenchStore((s) => s.setHoveredNode);
+  const toggleCollapse = useWorkbenchStore((s) => s.toggleCollapse);
+  const drillInto = useWorkbenchStore((s) => s.drillInto);
+  const jumpToNode = useWorkbenchStore((s) => s.jumpToNode);
+  const openPreviewDoc = useWorkbenchStore((s) => s.openPreviewDoc);
+  const setShowDiscarded = useWorkbenchStore((s) => s.setShowDiscarded);
+  const setShowParked = useWorkbenchStore((s) => s.setShowParked);
+  const setLayoutStats = useWorkbenchStore((s) => s.setLayoutStats);
+
+  const reactFlow = useReactFlow();
+  const [layoutResult, setLayoutResult] = useState<LayoutResult | null>(null);
+  const [layoutError, setLayoutError] = useState<string | null>(null);
+  const latestReqRef = useRef(0);
+
+  const renderGraph: RenderGraph | null = useMemo(() => {
+    if (!graph) return null;
+    return projectGraph(graph, {
+      view,
+      drillRoot,
+      collapsed,
+      showDiscarded,
+      showParked,
+      focusHideDimmed
+    });
+  }, [graph, view, drillRoot, collapsed, showDiscarded, showParked, focusHideDimmed]);
+
+  useEffect(() => {
+    if (!renderGraph) {
+      setLayoutResult(null);
+      return;
+    }
+
+    const reqId = ++latestReqRef.current;
+    let cancelled = false;
+
+    runElkLayout(renderGraph)
+      .then(({ result, cacheHit }) => {
+        if (cancelled || reqId !== latestReqRef.current) return;
+        setLayoutResult(result);
+        setLayoutError(null);
+        setLayoutStats(result.durationMs, cacheHit);
+      })
+      .catch((err) => {
+        if (cancelled || reqId !== latestReqRef.current) return;
+        setLayoutError(err instanceof Error ? err.message : String(err));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [renderGraph, setLayoutStats]);
+
+  // Fit view when layout changes significantly (graph switch, view switch, drillRoot, manual F)
+  const prevFitTriggerRef = useRef<string>("");
+  useEffect(() => {
+    if (!layoutResult) return;
+    const key = `${renderGraph?.graphId}:${view}:${drillRoot}:${fitViewNonce}`;
+    if (prevFitTriggerRef.current !== key) {
+      prevFitTriggerRef.current = key;
+      const timer = setTimeout(() => {
+        reactFlow.fitView({ padding: view === "report" ? 0.14 : 0.12, duration: 220 });
+      }, 30);
+      return () => clearTimeout(timer);
+    }
+  }, [layoutResult, renderGraph?.graphId, view, drillRoot, fitViewNonce, reactFlow]);
+
+  const handleOpenFirstAttachment = useCallback(
+    (nodeId: string) => {
+      selectNode(nodeId);
+      const node = graph?.nodes.find((n) => n.id === nodeId);
+      const firstLocal = node?.attachments?.find((a) => a.path);
+      if (firstLocal?.path) {
+        openPreviewDoc({ path: firstLocal.path, title: firstLocal.title });
+      }
+    },
+    [graph, selectNode, openPreviewDoc]
+  );
+
+  const handleRevealBucket = useCallback(
+    (bucket: "discarded" | "parked") => {
+      if (bucket === "discarded") setShowDiscarded(true);
+      else setShowParked(true);
+    },
+    [setShowDiscarded, setShowParked]
+  );
+
+  const activeFocusTarget = hoveredNodeId ?? selectedNodeId;
+
+  const rfNodes: RfNode[] = useMemo(() => {
+    if (!layoutResult) return [];
+    return layoutResult.nodes.map((pn) => {
+      if (pn.kind === "container" && pn.renderNode) {
+        return {
+          id: pn.id,
+          type: "container",
+          position: { x: pn.x, y: pn.y },
+          width: pn.width,
+          height: pn.height,
+          style: { width: pn.width, height: pn.height },
+          zIndex: pn.zIndex,
+          selected: selectedNodeId === pn.id,
+          draggable: false,
+          selectable: true,
+          data: {
+            renderNode: pn.renderNode,
+            view,
+            onToggleCollapse: toggleCollapse,
+            onDrillInto: drillInto,
+            onOpenFirstAttachment: handleOpenFirstAttachment
+          }
+        };
+      }
+      if (pn.kind === "stub" && pn.stub) {
+        return {
+          id: pn.id,
+          type: "stub",
+          position: { x: pn.x, y: pn.y },
+          width: pn.width,
+          height: pn.height,
+          style: { width: pn.width, height: pn.height },
+          zIndex: pn.zIndex,
+          draggable: false,
+          selectable: false,
+          data: {
+            stub: pn.stub,
+            onJumpToNode: jumpToNode
+          }
+        };
+      }
+      if (pn.kind === "capsule" && pn.capsule) {
+        return {
+          id: pn.id,
+          type: "capsule",
+          position: { x: pn.x, y: pn.y },
+          width: pn.width,
+          height: pn.height,
+          style: { width: pn.width, height: pn.height },
+          zIndex: pn.zIndex,
+          draggable: false,
+          selectable: false,
+          data: {
+            capsule: pn.capsule,
+            onRevealBucket: handleRevealBucket
+          }
+        };
+      }
+      return {
+        id: pn.id,
+        type: "thought",
+        position: { x: pn.x, y: pn.y },
+        width: pn.width,
+        height: pn.height,
+        style: { width: pn.width, height: pn.height },
+        zIndex: pn.zIndex,
+        selected: selectedNodeId === pn.id,
+        draggable: false,
+        selectable: true,
+        data: {
+          renderNode: pn.renderNode!,
+          view,
+          selected: selectedNodeId === pn.id,
+          onToggleCollapse: toggleCollapse,
+          onDrillInto: drillInto,
+          onOpenFirstAttachment: handleOpenFirstAttachment
+        }
+      };
+    });
+  }, [
+    layoutResult,
+    selectedNodeId,
+    view,
+    toggleCollapse,
+    drillInto,
+    handleOpenFirstAttachment,
+    jumpToNode,
+    handleRevealBucket
+  ]);
+
+  const rfEdges: RfEdge[] = useMemo(() => {
+    if (!layoutResult || !renderGraph) return [];
+    const nodeDimMap = new Map(renderGraph.nodes.map((n) => [n.id, n.dimmed]));
+
+    return layoutResult.edges.map((pe) => {
+      const re = pe.edge;
+      const connectedToActive =
+        activeFocusTarget !== null &&
+        (re.source === activeFocusTarget || re.target === activeFocusTarget);
+
+      const endpointDimmed =
+        view === "focus" &&
+        (nodeDimMap.get(re.source) === true || nodeDimMap.get(re.target) === true);
+
+      const crossLayerDimmed =
+        dimCrossHierarchyEdges && re.isCrossHierarchy && !connectedToActive;
+
+      return {
+        id: pe.id,
+        source: re.source,
+        target: re.target,
+        type: "elk",
+        zIndex: connectedToActive ? 150 : 50,
+        data: {
+          renderEdge: re,
+          points: pe.points,
+          highlighted: connectedToActive,
+          dimmed: endpointDimmed || crossLayerDimmed
+        }
+      };
+    });
+  }, [layoutResult, renderGraph, activeFocusTarget, view, dimCrossHierarchyEdges]);
+
+  return (
+    <div className={`tc-canvas-shell ${view === "report" ? "tc-canvas-report" : ""}`}>
+      {/* SVG Arrowhead marker defs shared by all ElkEdge instances */}
+      <svg className="tc-svg-defs" aria-hidden="true">
+        <defs>
+          <marker
+            id="tc-arrow-default"
+            viewBox="0 0 10 10"
+            refX="8.5"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#64748b" />
+          </marker>
+          <marker
+            id="tc-arrow-highlight"
+            viewBox="0 0 10 10"
+            refX="8.5"
+            refY="5"
+            markerWidth="7.5"
+            markerHeight="7.5"
+            orient="auto-start-reverse"
+          >
+            <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#2563eb" />
+          </marker>
+          <marker
+            id="tc-arrow-revises"
+            viewBox="0 0 10 10"
+            refX="8.5"
+            refY="5"
+            markerWidth="7.5"
+            markerHeight="7.5"
+            orient="auto-start-reverse"
+          >
+            <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#d97706" />
+          </marker>
+          <marker
+            id="tc-arrow-muted"
+            viewBox="0 0 10 10"
+            refX="8.5"
+            refY="5"
+            markerWidth="6.5"
+            markerHeight="6.5"
+            orient="auto-start-reverse"
+          >
+            <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#94a3b8" />
+          </marker>
+        </defs>
+      </svg>
+
+      {view === "focus" && renderGraph?.focus.isFallback && (
+        <div className="tc-canvas-notice">
+          <Info size={14} />
+          <span>{renderGraph.focus.message ?? "当前没有进行中的节点"} — 已展示就绪前沿与阻塞节点</span>
+        </div>
+      )}
+
+      {layoutError && (
+        <div className="tc-canvas-notice tc-canvas-notice-err">
+          布局计算失败：{layoutError}
+        </div>
+      )}
+
+      <ReactFlow
+        nodes={rfNodes}
+        edges={rfEdges}
+        nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={true}
+        panOnScroll={false}
+        zoomOnDoubleClick={false}
+        minZoom={0.18}
+        maxZoom={2.0}
+        onNodeClick={(_, node) => {
+          if (node.type === "thought" || node.type === "container") {
+            selectNode(node.id);
+          }
+        }}
+        onNodeMouseEnter={(_, node) => {
+          if (node.type === "thought" || node.type === "container") {
+            setHoveredNode(node.id);
+          }
+        }}
+        onNodeMouseLeave={() => setHoveredNode(null)}
+        onPaneClick={() => selectNode(null)}
+        proOptions={{ hideAttribution: true }}
+      >
+        <Background
+          variant={BackgroundVariant.Dots}
+          gap={view === "report" ? 28 : 20}
+          size={1.2}
+          color={view === "report" ? "#e2e8f0" : "#cbd5e1"}
+        />
+        <Controls showInteractive={false} position="bottom-left" />
+        {view !== "report" && (
+          <MiniMap
+            position="bottom-right"
+            pannable
+            zoomable
+            nodeStrokeWidth={2}
+            nodeColor={(n) => {
+              if (n.type === "container") return "#e2e8f0";
+              if (n.type === "stub") return "#bfdbfe";
+              if (n.type === "capsule") return "#cbd5e1";
+              return "#94a3b8";
+            }}
+          />
+        )}
+      </ReactFlow>
+    </div>
+  );
+}

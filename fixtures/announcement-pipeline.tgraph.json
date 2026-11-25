@@ -1,0 +1,536 @@
+{
+  "$schema": "../tgraph.schema.json",
+  "schemaVersion": 1,
+  "id": "announcement-pipeline",
+  "title": "公告采集解析方案决策链",
+  "layout": {
+    "direction": "DOWN"
+  },
+  "nodes": [
+    {
+      "id": "A",
+      "type": "goal",
+      "title": "持续采集全市场公告并回补历史一年",
+      "status": "parked",
+      "statusNote": "领导决定搁置两套全市场方案（见 F），转为先小规模验证公告分析价值（见 G）；验证结论积极时可恢复",
+      "description": "长期持续采集全市场公告，同时回补近一年历史公告"
+    },
+    {
+      "id": "B",
+      "type": "decision",
+      "title": "方案评估：是否购买 Gangtise 服务？",
+      "description": "领导层犹豫是否购买 Gangtise；分别评估购买与自主本地建设两条路线，形成对比结论供二选一"
+    },
+    {
+      "id": "C",
+      "parentId": "B",
+      "type": "option",
+      "title": "购买 Gangtise 服务",
+      "status": "parked",
+      "statusNote": "领导决定暂不购买；若重启全市场方案可恢复。注意：不用 Gangtise 则其一级/二级公告分类也无法沿用（见 M）"
+    },
+    {
+      "id": "C1",
+      "parentId": "C",
+      "type": "task",
+      "title": "能否满足业务需求？",
+      "status": "done",
+      "description": "统计公告规模与分布，核对常态、高峰和回补所需额度",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/公告日均规模和页数分布.md",
+          "title": "公告日均规模和页数分布"
+        }
+      ]
+    },
+    {
+      "id": "C2",
+      "parentId": "C",
+      "type": "task",
+      "title": "需要多少费用？",
+      "status": "done",
+      "description": "咨询付费方案，分别测算持续采集与历史回补费用",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/gangtise/gangtise收费方案.md",
+          "title": "Gangtise 收费方案与实测"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/gangtise/gangtise公告下载付费方案选择.md",
+          "title": "Gangtise 公告下载付费方案选择"
+        }
+      ]
+    },
+    {
+      "id": "D",
+      "parentId": "B",
+      "type": "option",
+      "title": "自主本地建设",
+      "status": "parked",
+      "statusNote": "领导决定暂不建设本地全市场方案；若重启全市场方案可恢复"
+    },
+    {
+      "id": "D1",
+      "parentId": "D",
+      "type": "task",
+      "title": "巨潮资讯 PDF 采集",
+      "status": "blocked",
+      "statusNote": "已完成 12,000 份唯一公告 PDF 的采集实测；指定日期范围内的分页完整性与持续运行稳定性尚未验证，恢复全市场方案前需补齐验证",
+      "description": "小规模压测爬虫稳定性，评估引入 IP 代理池",
+      "conclusion": "单线程实测成功下载 12,000 份唯一公告 PDF，未观察到下载错误；该结果不代表指定日期范围内已完整采集，也不代表长期持续访问稳定性已验证",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/爬虫/巨潮资讯公告爬取可行性.md",
+          "title": "巨潮资讯公告爬取可行性测试"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/爬虫/IP代理池资费情况.md",
+          "title": "IP 代理池资费情况"
+        }
+      ]
+    },
+    {
+      "id": "X1",
+      "parentId": "D",
+      "type": "option",
+      "title": "Tushare 公告 PDF 接口",
+      "status": "discarded",
+      "statusNote": "仅返回巨潮原始链接，下载仍需自行限流并引入 IP 代理池，未降低采集复杂度"
+    },
+    {
+      "id": "D2",
+      "parentId": "D",
+      "type": "task",
+      "title": "本地 PDF 解析选型",
+      "status": "done",
+      "description": "比较 OCR 模型，选定本地解析方案",
+      "conclusion": "选定成熟的 MinerU 作为本地 PDF 解析方案",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/pdf解析选型和硬件选型/本地pdf解析方案.md",
+          "title": "本地 PDF 解析方案"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/pdf解析选型和硬件选型/横向对比中国团队最新发布的三个 OCR 模型.md",
+          "title": "横向对比中国团队最新发布的三个 OCR 模型"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/pdf解析选型和硬件选型/公告解析OCR模型选型建议.md",
+          "title": "公告解析 OCR 模型选型建议"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/minerU/MinerU 对 PDF 提供4 个处理档位.md",
+          "title": "MinerU 的 4 个处理档位"
+        }
+      ]
+    },
+    {
+      "id": "X2",
+      "parentId": "D",
+      "type": "option",
+      "title": "云 PDF 解析服务（全市场方案）",
+      "status": "discarded",
+      "statusNote": "调研的服务中，低价方案不支持扫描件，其余方案费用超过 Gangtise；仅在全市场规模下否决，小规模研究仍采用云解析（见 H1）"
+    },
+    {
+      "id": "D3",
+      "parentId": "D",
+      "type": "task",
+      "title": "硬件吞吐调研",
+      "status": "done",
+      "description": "按日常、高峰与回补负载验证端到端解析能力",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/pdf解析选型和硬件选型/三个OCR模型显卡吞吐实测.md",
+          "title": "三个 OCR 模型显卡吞吐实测"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/minerU/minerU吞吐.md",
+          "title": "MinerU 吞吐"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/pdf解析选型和硬件选型/3090(24GB)双卡部署方案.md",
+          "title": "3090（24GB）双卡部署方案"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/pdf解析选型和硬件选型/云GPU租用报价.md",
+          "title": "云 GPU 租用报价"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/pdf解析选型和硬件选型/硬件电费预估.md",
+          "title": "硬件电费预估"
+        }
+      ]
+    },
+    {
+      "id": "E",
+      "parentId": "B",
+      "type": "milestone",
+      "title": "形成方案对比结论",
+      "status": "done",
+      "description": "比较业务覆盖、上线与回补工期、长期费用及运维投入，供领导层二选一",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/终论：gangtise与本地方案比较经济成本与运维成本.md",
+          "title": "Gangtise 与本地方案：经济成本与运维成本对比"
+        },
+        {
+          "path": "全市场公告采集解析与多空分析/pdf解析选型和硬件选型/本地pdf解析方案-开发工期与运维成本.md",
+          "title": "本地 PDF 解析：开发工期与运维成本评估"
+        }
+      ]
+    },
+    {
+      "id": "F",
+      "type": "milestone",
+      "title": "领导决定搁置两套全市场方案",
+      "status": "done",
+      "conclusion": "Gangtise 与自主本地建设均暂不实施，转而评估公告分析本身是否值得投入"
+    },
+    {
+      "id": "G",
+      "type": "decision",
+      "title": "公告分析是否值得投入数万元？"
+    },
+    {
+      "id": "H",
+      "parentId": "G",
+      "type": "option",
+      "title": "小规模研究公告分析的价值",
+      "description": "不做全市场，先选 10 个重点板块、覆盖近一年数据，验证价值后再决定是否继续投入",
+      "metrics": [
+        {
+          "label": "研究范围",
+          "value": "10 个重点板块 / 近 1 年",
+          "tone": "neutral"
+        }
+      ]
+    },
+    {
+      "id": "H1",
+      "parentId": "H",
+      "type": "task",
+      "title": "采用爬虫采集 PDF，交由云服务解析",
+      "status": "done",
+      "conclusion": "没有 Gangtise、也没有本地 PDF 解析时，小规模研究采用爬虫 + 云解析服务"
+    },
+    {
+      "id": "H2",
+      "parentId": "H",
+      "type": "task",
+      "title": "小规模研究公告的费用估算",
+      "description": "总费用 = DeepSeek API 费用 + 云解析费用 + IP 代理池费用；若可接受则开始采集",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/重点板块公告云解析费用估算.md",
+          "title": "重点板块公告云解析费用估算"
+        }
+      ],
+      "report": true
+    },
+    {
+      "id": "H3",
+      "parentId": "H2",
+      "type": "task",
+      "title": "DeepSeek API 费用",
+      "status": "done"
+    },
+    {
+      "id": "H4",
+      "parentId": "H2",
+      "type": "task",
+      "title": "云解析费用",
+      "description": "先估算单只个股年均公告量，再按板块所含个股数推算"
+    },
+    {
+      "id": "H6",
+      "parentId": "H4",
+      "type": "task",
+      "title": "抽样统计个股近一年的公告数",
+      "status": "done",
+      "description": "估算每只股票的年均公告量"
+    },
+    {
+      "id": "H7",
+      "parentId": "H4",
+      "type": "task",
+      "title": "推算各板块近一年的公告量",
+      "status": "done",
+      "description": "按板块所含个股数推算；汇总时对跨板块重复个股去重"
+    },
+    {
+      "id": "H8",
+      "parentId": "H4",
+      "type": "task",
+      "title": "按云服务计费口径估算解析费用",
+      "status": "done",
+      "description": "按页计费时，抽样估算每份公告的平均页数",
+      "conclusion": "已完成初版云解析预算：500 只 A 股情景下，近一年约 54.32 万页，302.AI 托管 MinerU 解析费约 3,618 元；目标板块成分股名单尚未确认，服务可达性与实际计费页数仍待实测"
+    },
+    {
+      "id": "H5",
+      "parentId": "H2",
+      "type": "task",
+      "title": "IP 代理池费用",
+      "status": "done",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/爬虫/IP代理池资费情况.md",
+          "title": "IP 代理池资费情况"
+        }
+      ]
+    },
+    {
+      "id": "H9",
+      "parentId": "H2",
+      "type": "milestone",
+      "title": "汇总三项费用，得到全量处理基线",
+      "status": "done",
+      "conclusion": "已完成初版全量处理基线：500 只 A 股情景下，云解析约 3,618 元、DeepSeek Flash 闲时分析约 916 元、代理试跑包 27 元，合计约 4,561 元；未扣除类别筛选节省额，服务器、存储和人工等另计，目标板块实际规模与服务效果仍待验证"
+    },
+    {
+      "id": "K",
+      "parentId": "H",
+      "type": "task",
+      "title": "研究可筛除或替代的公告类别",
+      "description": "通过筛除或用结构化数据替代部分公告类别节省成本，并用节省额修正预算",
+      "metrics": [
+        {
+          "label": "预计降本",
+          "value": "≥ 10%",
+          "tone": "positive"
+        }
+      ],
+      "report": true
+    },
+    {
+      "id": "K1",
+      "parentId": "K",
+      "type": "task",
+      "title": "按公告类别统计数量、页数和文本长度",
+      "status": "active",
+      "description": "筛选可剔除或可用结构化数据替代的类别",
+      "conclusion": "已有近一年公告类别筛选命中数统计；分类可能重叠，尚未完成按类别统计 PDF 页数和文本长度，不能据此认定本任务已完成",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/公告类别分布.md",
+          "title": "公告类别分布"
+        }
+      ]
+    },
+    {
+      "id": "K2",
+      "parentId": "K",
+      "type": "task",
+      "title": "优先评估财报原件",
+      "status": "todo",
+      "description": "财报原件约占公告总数 7%，每份平均约 10 万字符，优先评估能否用已有结构化财报数据替代",
+      "metrics": [
+        {
+          "label": "数量占比",
+          "value": "~7%",
+          "tone": "neutral"
+        },
+        {
+          "label": "单份长度",
+          "value": "~10万字符",
+          "tone": "warning"
+        }
+      ]
+    },
+    {
+      "id": "K3",
+      "parentId": "K",
+      "type": "task",
+      "title": "核对已有结构化财报数据的覆盖范围",
+      "status": "todo",
+      "description": "覆盖分析所需信息时，筛除对应的财报原件"
+    },
+    {
+      "id": "K4",
+      "parentId": "K",
+      "type": "task",
+      "title": "按实际计费单位测算节省额",
+      "status": "todo",
+      "description": "云解析按可跳过的 PDF 计费量计算，模型按替代前后的 token 差额计算"
+    },
+    {
+      "id": "K5",
+      "parentId": "K",
+      "type": "task",
+      "title": "对照全量处理基线复核节省比例",
+      "status": "todo",
+      "description": "初步预计 PDF 解析费和 token 费用可节省 10% 以上"
+    },
+    {
+      "id": "K6",
+      "parentId": "K",
+      "type": "milestone",
+      "title": "汇总降本后的研究预算",
+      "status": "todo",
+      "description": "按筛选后的处理规模重算三项费用"
+    },
+    {
+      "id": "M",
+      "parentId": "H",
+      "type": "task",
+      "title": "自建公告分类体系",
+      "status": "todo",
+      "description": "不再使用 Gangtise 数据源后，其附带的一级/二级公告分类无法沿用，需要自行分类并重组测试结构",
+      "attachments": [
+        {
+          "path": "全市场公告采集解析与多空分析/巨潮公告分类字典.md",
+          "title": "巨潮公告分类字典"
+        }
+      ]
+    },
+    {
+      "id": "N",
+      "parentId": "H",
+      "type": "task",
+      "title": "公告分析结果测评与优化",
+      "status": "todo",
+      "description": "费用可接受、开始采集后并行推进：命中率低的子分类剔除或优化提示词；命中率高的分类重点研究未命中个例"
+    },
+    {
+      "id": "L",
+      "parentId": "H",
+      "type": "task",
+      "title": "公告事件与行情相关性研究",
+      "status": "todo",
+      "report": true
+    },
+    {
+      "id": "H10",
+      "parentId": "H",
+      "type": "decision",
+      "title": "是否值得继续投入？",
+      "status": "todo",
+      "description": "结合相关性研究结果与降本后的总费用判断"
+    },
+    {
+      "id": "I",
+      "parentId": "G",
+      "type": "option",
+      "title": "暂停公告分析，恢复新闻分析",
+      "status": "parked",
+      "statusNote": "备选路线：新闻分析无需 PDF 解析，现阶段资金需求低；若小规模研究结论为不值得投入，则恢复此路线"
+    }
+  ],
+  "edges": [
+    {
+      "source": "A",
+      "target": "B"
+    },
+    {
+      "source": "C1",
+      "target": "E"
+    },
+    {
+      "source": "C2",
+      "target": "E"
+    },
+    {
+      "source": "D1",
+      "target": "X1"
+    },
+    {
+      "source": "D1",
+      "target": "E"
+    },
+    {
+      "source": "D2",
+      "target": "X2"
+    },
+    {
+      "source": "D2",
+      "target": "D3"
+    },
+    {
+      "source": "D3",
+      "target": "E"
+    },
+    {
+      "source": "E",
+      "target": "F"
+    },
+    {
+      "source": "F",
+      "target": "G"
+    },
+    {
+      "source": "H1",
+      "target": "H2"
+    },
+    {
+      "source": "H2",
+      "target": "N",
+      "kind": "depends_on"
+    },
+    {
+      "source": "H2",
+      "target": "L"
+    },
+    {
+      "source": "H3",
+      "target": "H9"
+    },
+    {
+      "source": "H6",
+      "target": "H7"
+    },
+    {
+      "source": "H7",
+      "target": "H8"
+    },
+    {
+      "source": "H7",
+      "target": "K1"
+    },
+    {
+      "source": "H8",
+      "target": "H9"
+    },
+    {
+      "source": "H5",
+      "target": "H9"
+    },
+    {
+      "source": "H9",
+      "target": "K5"
+    },
+    {
+      "source": "K",
+      "target": "L"
+    },
+    {
+      "source": "K1",
+      "target": "K2"
+    },
+    {
+      "source": "K2",
+      "target": "K3"
+    },
+    {
+      "source": "K3",
+      "target": "K4"
+    },
+    {
+      "source": "K4",
+      "target": "K5"
+    },
+    {
+      "source": "K5",
+      "target": "K6"
+    },
+    {
+      "source": "K6",
+      "target": "H9",
+      "kind": "revises"
+    },
+    {
+      "source": "L",
+      "target": "H10"
+    }
+  ]
+}

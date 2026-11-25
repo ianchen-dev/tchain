@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+*.log
+.thoughtchain/patches/archive/
+.thoughtchain/history/
+.thoughtchain/ui-state.json
+.thoughtchain/.lock
