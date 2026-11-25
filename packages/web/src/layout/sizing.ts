@@ -108,7 +108,8 @@ export function estimateNodeSize(rn: RenderNode, view: ViewMode): NodeSize {
       bodyFont,
       maxConclusionLines
     );
-    height += 16 + cLines * bodyLineHeight + 12;
+    // Match the conclusion's vertical padding (5px / 7px per side) and the card gap.
+    height += (isReport ? 14 : 10) + cLines * bodyLineHeight + 6;
   } else if (!isReport && rn.node.description && rn.isCollapsed) {
     const dLines = estimateWrappedLines(rn.node.description, innerWidth, bodyFont, 2);
     height += 8 + dLines * bodyLineHeight;
@@ -118,7 +119,8 @@ export function estimateNodeSize(rn: RenderNode, view: ViewMode): NodeSize {
   const metrics = rn.node.metrics ?? [];
   if (metrics.length > 0) {
     const rows = Math.ceil(metrics.length / 2);
-    height += 10 + rows * (isReport ? 28 : 24);
+    // Include the card gap, row margin, and spacing between wrapped rows.
+    height += 6 + 2 + rows * (isReport ? 24 : 21) + (rows - 1) * 5;
   }
 
   // Collapsed container footer (child count summary)

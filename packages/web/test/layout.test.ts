@@ -34,6 +34,20 @@ describe("Web ELK Layout Engine & Sizing (0 号样板 smoke tests)", () => {
     expect(sWs.height).toBeGreaterThanOrEqual(78);
   });
 
+  it("keeps the workspace K2 card compact with a two-line conclusion and one row of metrics", () => {
+    const graph = projectGraph(sample, { view: "workspace" });
+    const k2 = graph.nodes.find((node) => node.id === "K2")!;
+    const card = {
+      ...k2,
+      node: {
+        ...k2.node,
+        conclusion: "据业务人员反馈，私有数据库已有结构化财报数据。财报分析使用已有结构化数据。"
+      }
+    };
+
+    expect(estimateNodeSize(card, "workspace")).toEqual({ width: 268, height: 146 });
+  });
+
   it("layouts full workspace, report, collapsed, and drilled views with valid absolute edge points in <300ms", async () => {
     const scenarios = [
       {
