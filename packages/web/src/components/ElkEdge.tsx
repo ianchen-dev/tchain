@@ -8,6 +8,9 @@ export interface ElkEdgeData extends Record<string, unknown> {
   points: ElkPoint[];
   highlighted: boolean;
   dimmed: boolean;
+  selected?: boolean;
+  diffAdded?: boolean;
+  clickable?: boolean;
 }
 
 /**
@@ -111,7 +114,11 @@ export const ElkEdge = memo(function ElkEdge(props: EdgeProps) {
   let markerEnd = "url(#tc-arrow-default)";
   let strokeDasharray: string | undefined;
 
-  if (isRevises) {
+  if (data?.diffAdded) {
+    stroke = "#10b981";
+    markerEnd = "url(#tc-arrow-added)";
+    strokeDasharray = "6 3";
+  } else if (isRevises) {
     stroke = "#d97706";
     markerEnd = "url(#tc-arrow-revises)";
     strokeDasharray = "6 4";
@@ -128,15 +135,28 @@ export const ElkEdge = memo(function ElkEdge(props: EdgeProps) {
     strokeDasharray = "5 3";
   }
 
-  if (data?.highlighted) {
+  if (data?.selected || data?.highlighted) {
     stroke = isRevises ? "#b45309" : "#2563eb";
     markerEnd = isRevises ? "url(#tc-arrow-revises)" : "url(#tc-arrow-highlight)";
   }
 
-  const opacity = data?.dimmed ? 0.16 : data?.highlighted ? 1 : re?.isCapsuleEdge ? 0.55 : 0.85;
-  const strokeWidth = data?.highlighted ? 2.4 : isRevises ? 2 : 1.75;
+  const opacity = data?.dimmed
+    ? 0.16
+    : data?.selected || data?.highlighted || data?.diffAdded
+      ? 1
+      : re?.isCapsuleEdge
+        ? 0.55
+        : 0.85;
+  const strokeWidth = data?.selected
+    ? 3
+    : data?.highlighted || data?.diffAdded
+      ? 2.4
+      : isRevises
+        ? 2
+        : 1.75;
 
   const badgeParts: string[] = [];
+  if (data?.diffAdded) badgeParts.push("+ 新增连线");
   if (isRevises) badgeParts.push("回流修正");
   if (re && re.bypassedCount > 0) badgeParts.push(`跳过 ${re.bypassedCount} 步`);
   if (re && re.count > 1) badgeParts.push(`×${re.count}`);
@@ -144,6 +164,16 @@ export const ElkEdge = memo(function ElkEdge(props: EdgeProps) {
 
   return (
     <>
+      {data?.clickable && (
+        <path
+          d={pathD}
+          fill="none"
+          stroke="transparent"
+          strokeWidth={14}
+          style={{ pointerEvents: "stroke", cursor: "pointer" }}
+        />
+      )}
+
       <path
         id={props.id}
         d={pathD}
@@ -161,8 +191,8 @@ export const ElkEdge = memo(function ElkEdge(props: EdgeProps) {
         <EdgeLabelRenderer>
           <div
             className={`tc-edge-badge ${isRevises ? "tc-edge-badge-revises" : ""} ${
-              data?.highlighted ? "tc-edge-badge-highlight" : ""
-            }`}
+              data?.diffAdded ? "tc-edge-badge-added" : ""
+            } ${data?.highlighted || data?.selected ? "tc-edge-badge-highlight" : ""}`}
             style={{
               position: "absolute",
               transform: `translate(-50%, ${isRevises ? "-125%" : "-50%"}) translate(${mid.x}px, ${mid.y}px)`,

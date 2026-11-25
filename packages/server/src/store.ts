@@ -4,15 +4,32 @@ import chokidar, { type FSWatcher } from "chokidar";
 import {
   computeFocus,
   deriveGraph,
+  diffGraphs,
   hashGraph,
+  preparePatchOps,
+  serializeGraph,
+  summarizeOps,
   validateGraph,
   type Diagnostic,
   type Graph,
+  type HistoryEntry,
+  type Op,
+  type OpSummaryCounts,
+  type PatchOp,
   type Status
 } from "@tchain/core";
 import {
+  atomicWriteText,
+  listPendingPatches,
+  NotFoundError,
+  readHistoryIndex,
+  saveHistorySnapshotUnlocked,
+  withWorkspaceLock
+} from "./storage.js";
+import {
   GRAPHS_SUBDIR,
   makeFileExistsChecker,
+  PATCHES_SUBDIR,
   resolveGraphFiles,
   THOUGHTCHAIN_DIR
 } from "./workspace.js";
@@ -21,6 +38,20 @@ export interface GraphErrorRecord {
   message: string;
   errors: Diagnostic[];
   at: string;
+}
+
+export interface PendingExternalChange {
+  id: string;
+  graphId: string;
+  file: string;
+  baseHash: string;
+  nextHash: string;
+  nextGraph: Graph;
+  ops: PatchOp[];
+  summary: OpSummaryCounts;
+  metadataChanged: boolean;
+  warnings: Diagnostic[];
+  detectedAt: string;
 }
 
 export interface GraphStatusCounts {
@@ -46,6 +77,8 @@ export interface GraphSummaryItem {
   focusNextIds?: string[];
   errorCount: number;
   warningCount: number;
+  pendingPatchCount?: number;
+  hasExternalChange?: boolean;
   lastError?: GraphErrorRecord | null;
 }
 
@@ -83,6 +116,34 @@ export type ServerEvent =
       type: "graph:removed";
       payload: {
         graphId: string;
+        at: string;
+      };
+    }
+  | {
+      type: "patches:updated";
+      payload: {
+        file?: string;
+        graphId?: string;
+        at: string;
+      };
+    }
+  | {
+      type: "external:changed";
+      payload: {
+        graphId: string;
+        baseHash: string;
+        nextHash: string;
+        opCount: number;
+        metadataChanged: boolean;
+        summary: OpSummaryCounts;
+        at: string;
+      };
+    }
+  | {
+      type: "external:resolved";
+      payload: {
+        graphId: string;
+        resolution: "accepted" | "reverted" | "cleared";
         at: string;
       };
     };
@@ -195,24 +256,48 @@ export function listWorkspaceGraphs(workspaceRoot: string): GraphSummaryItem[] {
   return items;
 }
 
+interface ManualEditSession {
+  graphId: string;
+  editCount: number;
+  opCount: number;
+  latestGraph: Graph;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export interface WorkspaceStoreOptions {
+  /** Idle duration before merging manual edits into a history snapshot (default 2 minutes). */
+  manualSnapshotIdleMs?: number;
+}
+
 /**
- * In-memory graph cache + chokidar watcher for `tchain serve` (Phase 1 read-only).
- * Preserves the last valid graph when an external edit writes invalid JSON/schema,
- * and broadcasts SSE notifications within ~150ms.
+ * In-memory graph cache + chokidar watchers for `tchain serve` (Phase 2).
+ * - Preserves `lastValidGraph` on invalid external JSON/schema edits.
+ * - Routes valid external file edits into pending review (`external:changed`),
+ *   supporting Accept (baseline update without rewriting file) or Revert.
+ * - Filters out self-written hashes from unified mutation pipeline.
+ * - Watches `.thoughtchain/patches/` and pushes `patches:updated` via SSE.
  */
 export class WorkspaceStore {
   readonly workspaceRoot: string;
   readonly graphsDir: string;
+  readonly patchesDir: string;
   private readonly entries = new Map<string, StoredGraphEntry>();
   private readonly filePathToId = new Map<string, string>();
+  private readonly ownWrittenHashes = new Map<string, Set<string>>();
+  private readonly pendingExternalChanges = new Map<string, PendingExternalChange>();
+  private readonly manualSessions = new Map<string, ManualEditSession>();
   private readonly listeners = new Set<(event: ServerEvent) => void>();
-  private watcher: FSWatcher | null = null;
+  private graphWatcher: FSWatcher | null = null;
+  private patchWatcher: FSWatcher | null = null;
   private readonly fileExists: (posixPath: string) => boolean;
+  private readonly manualSnapshotIdleMs: number;
 
-  constructor(workspaceRoot: string) {
+  constructor(workspaceRoot: string, options?: WorkspaceStoreOptions) {
     this.workspaceRoot = path.resolve(workspaceRoot);
     this.graphsDir = path.join(this.workspaceRoot, THOUGHTCHAIN_DIR, GRAPHS_SUBDIR);
+    this.patchesDir = path.join(this.workspaceRoot, THOUGHTCHAIN_DIR, PATCHES_SUBDIR);
     this.fileExists = makeFileExistsChecker(this.workspaceRoot);
+    this.manualSnapshotIdleMs = options?.manualSnapshotIdleMs ?? 120_000;
     this.reloadAll();
   }
 
@@ -223,7 +308,7 @@ export class WorkspaceStore {
     };
   }
 
-  private emit(event: ServerEvent): void {
+  emit(event: ServerEvent): void {
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -231,6 +316,125 @@ export class WorkspaceStore {
         // Isolate subscriber failures
       }
     }
+  }
+
+  registerOwnWriteHash(graphId: string, hash: string): void {
+    let set = this.ownWrittenHashes.get(graphId);
+    if (!set) {
+      set = new Set<string>();
+      this.ownWrittenHashes.set(graphId, set);
+    }
+    set.add(hash);
+  }
+
+  private isAndConsumeOwnWriteHash(graphId: string, hash: string): boolean {
+    const set = this.ownWrittenHashes.get(graphId);
+    if (!set || !set.has(hash)) return false;
+    set.delete(hash);
+    return true;
+  }
+
+  /**
+   * Called immediately after our own unified mutation pipeline writes a new
+   * graph version to disk, updating in-memory baseline and pushing SSE.
+   */
+  applyCommittedGraph(
+    graphId: string,
+    graph: Graph,
+    hash: string,
+    warnings: Diagnostic[]
+  ): void {
+    const existing = this.entries.get(graphId);
+    const filePath =
+      existing?.filePath ?? path.join(this.graphsDir, `${graphId}.tgraph.json`);
+    const relFile = path.relative(this.workspaceRoot, filePath).replace(/\\/g, "/");
+
+    this.entries.set(graphId, {
+      id: graphId,
+      filePath,
+      relFile,
+      lastValidGraph: graph,
+      lastValidHash: hash,
+      lastValidWarnings: warnings,
+      lastError: null
+    });
+    this.filePathToId.set(path.resolve(filePath), graphId);
+
+    const hadExternal = this.pendingExternalChanges.delete(graphId);
+    const now = new Date().toISOString();
+    if (hadExternal) {
+      this.emit({
+        type: "external:resolved",
+        payload: { graphId, resolution: "cleared", at: now }
+      });
+    }
+    this.emit({
+      type: "graph:updated",
+      payload: {
+        graphId,
+        hash,
+        warningCount: warnings.length,
+        at: now
+      }
+    });
+  }
+
+  /**
+   * Tracks manual UI editing sessions; after `manualSnapshotIdleMs` (default 2 min)
+   * of inactivity, merges the session into a single history snapshot (PRD §7.6).
+   */
+  recordManualEdit(
+    graphId: string,
+    previousGraph: Graph,
+    nextGraph: Graph,
+    ops: Op[]
+  ): void {
+    const existingSession = this.manualSessions.get(graphId);
+    if (existingSession) {
+      clearTimeout(existingSession.timer);
+    } else if (readHistoryIndex(this.workspaceRoot, graphId).length === 0) {
+      // Ensure pre-edit baseline exists so user can always roll back to before first manual edit
+      void withWorkspaceLock(this.workspaceRoot, async () => {
+        if (readHistoryIndex(this.workspaceRoot, graphId).length === 0) {
+          await saveHistorySnapshotUnlocked(this.workspaceRoot, graphId, previousGraph, {
+            source: "manual",
+            title: "人工编辑前初始快照",
+            counts: summarizeOps([])
+          });
+        }
+      }).catch(() => {
+        // ignore background baseline snapshot errors
+      });
+    }
+
+    const editCount = (existingSession?.editCount ?? 0) + 1;
+    const opCount = (existingSession?.opCount ?? 0) + ops.length;
+
+    const timer = setTimeout(() => {
+      const sess = this.manualSessions.get(graphId);
+      if (!sess) return;
+      this.manualSessions.delete(graphId);
+      void withWorkspaceLock(this.workspaceRoot, async () => {
+        await saveHistorySnapshotUnlocked(this.workspaceRoot, graphId, sess.latestGraph, {
+          source: "manual",
+          title: `人工编辑会话（${sess.editCount} 次修改 / ${sess.opCount} 项操作）`,
+          counts: {
+            ...summarizeOps([]),
+            totalOps: sess.opCount
+          }
+        });
+      }).catch(() => {
+        // ignore if workspace was closed/removed
+      });
+    }, this.manualSnapshotIdleMs);
+
+    this.manualSessions.set(graphId, {
+      graphId,
+      editCount,
+      opCount,
+      latestGraph: nextGraph,
+      timer
+    });
   }
 
   reloadAll(): void {
@@ -244,7 +448,8 @@ export class WorkspaceStore {
     if (!filePath.endsWith(".tgraph.json")) return;
     const resolvedPath = path.resolve(filePath);
     const relFile = path.relative(this.workspaceRoot, resolvedPath).replace(/\\/g, "/");
-    const fallbackId = this.filePathToId.get(resolvedPath) ?? graphIdFromFilename(resolvedPath);
+    const fallbackId =
+      this.filePathToId.get(resolvedPath) ?? graphIdFromFilename(resolvedPath);
     const prev = this.entries.get(fallbackId);
     const now = new Date().toISOString();
 
@@ -341,15 +546,102 @@ export class WorkspaceStore {
     const hash = hashGraph(graph);
     const id = graph.id;
 
-    // Clean up old id mapping if file's internal graph.id changed
     if (fallbackId !== id && this.entries.get(fallbackId)?.filePath === resolvedPath) {
       this.entries.delete(fallbackId);
     }
 
+    const existing = this.entries.get(id) ?? prev;
+
+    // 1. Check if this file event was triggered by our own server write pipeline
+    if (this.isAndConsumeOwnWriteHash(id, hash)) {
+      this.entries.set(id, {
+        id,
+        filePath: resolvedPath,
+        relFile,
+        lastValidGraph: graph,
+        lastValidHash: hash,
+        lastValidWarnings: validation.warnings,
+        lastError: null
+      });
+      this.filePathToId.set(resolvedPath, id);
+      return;
+    }
+
+    // 2. If baseline already exists and file changed externally -> enter External Change Review (PRD §7.6)
+    if (
+      notify &&
+      existing?.lastValidGraph &&
+      existing.lastValidHash &&
+      existing.lastValidHash !== hash
+    ) {
+      const rawOps = diffGraphs(existing.lastValidGraph, graph);
+      let enrichedOps: PatchOp[] = [];
+      let summary = summarizeOps(rawOps);
+      if (rawOps.length > 0) {
+        try {
+          const prepared = preparePatchOps(existing.lastValidGraph, rawOps, {
+            fileExists: this.fileExists
+          });
+          enrichedOps = prepared.ops;
+          summary = prepared.summary;
+        } catch {
+          enrichedOps = rawOps as PatchOp[];
+        }
+      }
+
+      const metadataChanged =
+        existing.lastValidGraph.title !== graph.title ||
+        JSON.stringify(existing.lastValidGraph.layout ?? null) !==
+          JSON.stringify(graph.layout ?? null);
+
+      const pending: PendingExternalChange = {
+        id: `ext-${Date.now()}`,
+        graphId: id,
+        file: relFile,
+        baseHash: existing.lastValidHash,
+        nextHash: hash,
+        nextGraph: graph,
+        ops: enrichedOps,
+        summary,
+        metadataChanged,
+        warnings: validation.warnings,
+        detectedAt: now
+      };
+      this.pendingExternalChanges.set(id, pending);
+
+      // Clear any previous syntax error since file is now valid, while preserving baseline!
+      this.entries.set(id, {
+        ...existing,
+        id,
+        filePath: resolvedPath,
+        relFile,
+        lastError: null
+      });
+      this.filePathToId.set(resolvedPath, id);
+
+      this.emit({
+        type: "external:changed",
+        payload: {
+          graphId: id,
+          baseHash: existing.lastValidHash,
+          nextHash: hash,
+          opCount: enrichedOps.length,
+          metadataChanged,
+          summary,
+          at: now
+        }
+      });
+      return;
+    }
+
+    // 3. Initial load, newly added graph file, or external edit restored back to baseline
+    const hadError = existing?.lastError !== null;
+    const hadPendingExternal = this.pendingExternalChanges.delete(id);
     const changed =
-      prev?.lastValidHash !== hash ||
-      prev?.lastError !== null ||
-      prev?.lastValidWarnings.length !== validation.warnings.length;
+      existing?.lastValidHash !== hash ||
+      hadError ||
+      hadPendingExternal ||
+      existing?.lastValidWarnings.length !== validation.warnings.length;
 
     this.entries.set(id, {
       id,
@@ -362,6 +654,12 @@ export class WorkspaceStore {
     });
     this.filePathToId.set(resolvedPath, id);
 
+    if (notify && hadPendingExternal) {
+      this.emit({
+        type: "external:resolved",
+        payload: { graphId: id, resolution: "cleared", at: now }
+      });
+    }
     if (notify && changed) {
       this.emit({
         type: "graph:updated",
@@ -375,10 +673,127 @@ export class WorkspaceStore {
     }
   }
 
+  getPendingExternalChange(graphId: string): PendingExternalChange | null {
+    return this.pendingExternalChanges.get(graphId) ?? null;
+  }
+
+  /**
+   * Accepts an external direct file modification (PRD §7.6):
+   * saves pre-accept history snapshot of baseline and updates baseline in memory
+   * WITHOUT rewriting the user's file on disk.
+   */
+  async acceptExternalChange(graphId: string): Promise<{
+    graph: Graph;
+    hash: string;
+    warnings: Diagnostic[];
+    savedRev: HistoryEntry;
+  }> {
+    return await withWorkspaceLock(this.workspaceRoot, async () => {
+      const entry = this.entries.get(graphId);
+      const pending = this.pendingExternalChanges.get(graphId);
+      if (!entry || !entry.lastValidGraph || !pending) {
+        throw new NotFoundError(`No pending external change for graph "${graphId}"`);
+      }
+
+      const savedRev = await saveHistorySnapshotUnlocked(
+        this.workspaceRoot,
+        graphId,
+        entry.lastValidGraph,
+        {
+          source: "external",
+          title: "接受外部修改前快照",
+          counts: pending.summary
+        }
+      );
+
+      this.entries.set(graphId, {
+        ...entry,
+        lastValidGraph: pending.nextGraph,
+        lastValidHash: pending.nextHash,
+        lastValidWarnings: pending.warnings,
+        lastError: null
+      });
+      this.pendingExternalChanges.delete(graphId);
+
+      const now = new Date().toISOString();
+      this.emit({
+        type: "external:resolved",
+        payload: { graphId, resolution: "accepted", at: now }
+      });
+      this.emit({
+        type: "graph:updated",
+        payload: {
+          graphId,
+          hash: pending.nextHash,
+          warningCount: pending.warnings.length,
+          at: now
+        }
+      });
+
+      return {
+        graph: pending.nextGraph,
+        hash: pending.nextHash,
+        warnings: pending.warnings,
+        savedRev
+      };
+    });
+  }
+
+  /**
+   * Reverts an external direct file modification (PRD §7.6):
+   * writes the last valid baseline graph atomically back to disk.
+   */
+  async revertExternalChange(graphId: string): Promise<{
+    graph: Graph;
+    hash: string;
+    warnings: Diagnostic[];
+  }> {
+    return await withWorkspaceLock(this.workspaceRoot, async () => {
+      const entry = this.entries.get(graphId);
+      if (!entry || !entry.lastValidGraph || !entry.lastValidHash) {
+        throw new NotFoundError(`No baseline available to revert graph "${graphId}"`);
+      }
+
+      const canonicalText = serializeGraph(entry.lastValidGraph);
+      const baselineHash = hashGraph(entry.lastValidGraph);
+      this.registerOwnWriteHash(graphId, baselineHash);
+      await atomicWriteText(entry.filePath, canonicalText);
+
+      this.pendingExternalChanges.delete(graphId);
+      this.entries.set(graphId, {
+        ...entry,
+        lastValidHash: baselineHash,
+        lastError: null
+      });
+
+      const now = new Date().toISOString();
+      this.emit({
+        type: "external:resolved",
+        payload: { graphId, resolution: "reverted", at: now }
+      });
+      this.emit({
+        type: "graph:updated",
+        payload: {
+          graphId,
+          hash: baselineHash,
+          warningCount: entry.lastValidWarnings.length,
+          at: now
+        }
+      });
+
+      return {
+        graph: entry.lastValidGraph,
+        hash: baselineHash,
+        warnings: entry.lastValidWarnings
+      };
+    });
+  }
+
   private handleFileRemoved(filePath: string, notify: boolean): void {
     const resolvedPath = path.resolve(filePath);
     const id = this.filePathToId.get(resolvedPath) ?? graphIdFromFilename(resolvedPath);
     this.filePathToId.delete(resolvedPath);
+    this.pendingExternalChanges.delete(id);
     if (this.entries.delete(id) && notify) {
       this.emit({
         type: "graph:removed",
@@ -391,29 +806,69 @@ export class WorkspaceStore {
   }
 
   startWatching(): void {
-    if (this.watcher) return;
-    if (!fs.existsSync(this.graphsDir)) {
-      fs.mkdirSync(this.graphsDir, { recursive: true });
+    if (!this.graphWatcher) {
+      if (!fs.existsSync(this.graphsDir)) {
+        fs.mkdirSync(this.graphsDir, { recursive: true });
+      }
+
+      this.graphWatcher = chokidar.watch(this.graphsDir, {
+        ignoreInitial: true,
+        depth: 0,
+        awaitWriteFinish: {
+          stabilityThreshold: 100,
+          pollInterval: 25
+        }
+      });
+
+      this.graphWatcher.on("add", (filePath) => this.loadFile(filePath, true));
+      this.graphWatcher.on("change", (filePath) => this.loadFile(filePath, true));
+      this.graphWatcher.on("unlink", (filePath) => this.handleFileRemoved(filePath, true));
     }
 
-    this.watcher = chokidar.watch(this.graphsDir, {
-      ignoreInitial: true,
-      depth: 0,
-      awaitWriteFinish: {
-        stabilityThreshold: 100,
-        pollInterval: 25
+    if (!this.patchWatcher) {
+      if (!fs.existsSync(this.patchesDir)) {
+        fs.mkdirSync(this.patchesDir, { recursive: true });
       }
-    });
 
-    this.watcher.on("add", (filePath) => this.loadFile(filePath, true));
-    this.watcher.on("change", (filePath) => this.loadFile(filePath, true));
-    this.watcher.on("unlink", (filePath) => this.handleFileRemoved(filePath, true));
+      this.patchWatcher = chokidar.watch(this.patchesDir, {
+        ignoreInitial: true,
+        depth: 0,
+        awaitWriteFinish: {
+          stabilityThreshold: 80,
+          pollInterval: 20
+        }
+      });
+
+      const onPatchEvent = (filePath: string) => {
+        if (!filePath.endsWith(".patch.json")) return;
+        this.emit({
+          type: "patches:updated",
+          payload: {
+            file: path.basename(filePath),
+            at: new Date().toISOString()
+          }
+        });
+      };
+
+      this.patchWatcher.on("add", onPatchEvent);
+      this.patchWatcher.on("change", onPatchEvent);
+      this.patchWatcher.on("unlink", onPatchEvent);
+    }
   }
 
   async close(): Promise<void> {
-    if (this.watcher) {
-      await this.watcher.close();
-      this.watcher = null;
+    for (const sess of this.manualSessions.values()) {
+      clearTimeout(sess.timer);
+    }
+    this.manualSessions.clear();
+
+    if (this.graphWatcher) {
+      await this.graphWatcher.close();
+      this.graphWatcher = null;
+    }
+    if (this.patchWatcher) {
+      await this.patchWatcher.close();
+      this.patchWatcher = null;
     }
     this.listeners.clear();
   }
@@ -423,6 +878,15 @@ export class WorkspaceStore {
   }
 
   listSummaries(): GraphSummaryItem[] {
+    const pendingPatches = listPendingPatches(this.workspaceRoot);
+    const pendingByGraph = new Map<string, number>();
+    for (const p of pendingPatches) {
+      pendingByGraph.set(
+        p.patch.graphId,
+        (pendingByGraph.get(p.patch.graphId) ?? 0) + 1
+      );
+    }
+
     const list: GraphSummaryItem[] = [];
     for (const entry of this.entries.values()) {
       const g = entry.lastValidGraph;
@@ -439,6 +903,8 @@ export class WorkspaceStore {
           : {}),
         errorCount: entry.lastError ? entry.lastError.errors.length : 0,
         warningCount: entry.lastValidWarnings.length,
+        pendingPatchCount: pendingByGraph.get(entry.id) ?? 0,
+        hasExternalChange: this.pendingExternalChanges.has(entry.id),
         lastError: entry.lastError
       });
     }

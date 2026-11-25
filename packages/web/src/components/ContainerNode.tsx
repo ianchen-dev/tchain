@@ -7,6 +7,10 @@ import { NODE_TYPE_META, STATUS_META } from "./statusMeta.js";
 export interface ContainerNodeData extends Record<string, unknown> {
   renderNode: RenderNode;
   view: ViewMode;
+  connectable?: boolean;
+  diffState?: "added" | "modified";
+  statusTransition?: { before: string; after: string };
+  diffTooltip?: string;
   onToggleCollapse: (id: string) => void;
   onDrillInto: (id: string) => void;
   onOpenFirstAttachment: (id: string) => void;
@@ -14,7 +18,17 @@ export interface ContainerNodeData extends Record<string, unknown> {
 
 export const ContainerNode = memo(function ContainerNode(props: NodeProps) {
   const data = props.data as ContainerNodeData;
-  const { renderNode: rn, view, onToggleCollapse, onDrillInto, onOpenFirstAttachment } = data;
+  const {
+    renderNode: rn,
+    view,
+    connectable,
+    diffState,
+    statusTransition,
+    diffTooltip,
+    onToggleCollapse,
+    onDrillInto,
+    onOpenFirstAttachment
+  } = data;
   const { node, effectiveStatus, dimmed, focusRole } = rn;
   const statusMeta = STATUS_META[effectiveStatus];
   const typeMeta = NODE_TYPE_META[node.type];
@@ -28,14 +42,19 @@ export const ContainerNode = memo(function ContainerNode(props: NodeProps) {
     isReport ? "tc-container-report" : "",
     dimmed ? "tc-dimmed" : "",
     focusRole !== "none" ? `tc-focus-${focusRole}` : "",
-    props.selected ? "tc-selected" : ""
+    props.selected ? "tc-selected" : "",
+    diffState === "added" ? "tc-diff-added" : "",
+    diffState === "modified" ? "tc-diff-modified" : ""
   ]
     .filter(Boolean)
     .join(" ");
 
+  const handleClass = connectable ? "tc-handle-connect" : "tc-handle-hidden";
+
   return (
     <div
       className={classes}
+      title={diffTooltip}
       style={{
         width: "100%",
         height: "100%",
@@ -46,7 +65,12 @@ export const ContainerNode = memo(function ContainerNode(props: NodeProps) {
         onDrillInto(rn.id);
       }}
     >
-      <Handle type="target" position={Position.Top} className="tc-handle-hidden" />
+      <Handle
+        type="target"
+        position={Position.Top}
+        className={handleClass}
+        isConnectable={Boolean(connectable)}
+      />
 
       <div className="tc-container-header">
         <div className="tc-container-title-group">
@@ -70,6 +94,14 @@ export const ContainerNode = memo(function ContainerNode(props: NodeProps) {
           >
             {statusMeta.shortLabel}
           </span>
+          {diffState === "added" && <span className="tc-diff-pill tc-diff-pill-add">+ 新增</span>}
+          {diffState === "modified" && (
+            <span className="tc-diff-pill tc-diff-pill-mod">
+              {statusTransition
+                ? `${statusTransition.before} → ${statusTransition.after}`
+                : "已修改"}
+            </span>
+          )}
         </div>
 
         <div className="tc-container-actions">
@@ -130,7 +162,12 @@ export const ContainerNode = memo(function ContainerNode(props: NodeProps) {
         </div>
       )}
 
-      <Handle type="source" position={Position.Bottom} className="tc-handle-hidden" />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className={handleClass}
+        isConnectable={Boolean(connectable)}
+      />
     </div>
   );
 });

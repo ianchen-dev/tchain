@@ -3,13 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import {
+  ApplyError,
   compileContext,
   computeFocus,
+  evaluatePatchAgainstGraph,
   hashGraph,
   serializeGraph,
   validateGraph,
   type Diagnostic,
-  type Graph
+  type Graph,
+  type Op
 } from "@tchain/core";
 import {
   initWorkspace,
@@ -19,14 +22,28 @@ import {
 } from "./workspace.js";
 import { listWorkspaceGraphs } from "./store.js";
 import { startWorkbenchServer } from "./server.js";
+import { runMcpStdioServer } from "./mcp.js";
+import {
+  applyPatchById,
+  findPatchRecord,
+  listPendingPatches,
+  NotFoundError,
+  proposePatch,
+  readHistoryIndex,
+  readValidatedGraph,
+  rejectPatchById,
+  rollbackGraph
+} from "./storage.js";
 
 function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function readJsonFile(filePath: string): { ok: true; data: unknown } | { ok: false; error: string } {
+function readJsonFile(
+  filePath: string
+): { ok: true; data: unknown } | { ok: false; error: string } {
   try {
-    const raw = fs.readFileSync(filePath, "utf8");
+    const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
     return { ok: true, data: JSON.parse(raw) };
   } catch (err) {
     return {
@@ -41,7 +58,7 @@ export function createProgram(): Command {
 
   program
     .name("tchain")
-    .description("ThoughtChain Decision Workbench CLI & local server")
+    .description("ThoughtChain Decision Workbench CLI, local server & MCP")
     .version("0.1.0")
     .option("-C, --dir <dir>", "Specify workspace root directory");
 
@@ -270,7 +287,10 @@ export function createProgram(): Command {
         const format = opts.format === "json" ? "json" : "md";
         const maxTokens =
           opts.maxTokens !== undefined ? Number.parseInt(opts.maxTokens, 10) : undefined;
-        if (opts.maxTokens !== undefined && (!Number.isFinite(maxTokens) || (maxTokens ?? 0) <= 0)) {
+        if (
+          opts.maxTokens !== undefined &&
+          (!Number.isFinite(maxTokens) || (maxTokens ?? 0) <= 0)
+        ) {
           printJson({
             ok: false,
             error: `Invalid --max-tokens value: ${opts.maxTokens}`
@@ -356,6 +376,316 @@ export function createProgram(): Command {
       } catch (err) {
         printJson({
           ok: false,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        process.exitCode = 1;
+      }
+    });
+
+  // ── Phase 2: MCP stdio server (PRD §7.4 / §7.5) ──────────────────────────
+  program
+    .command("mcp [dir]")
+    .description("Start the ThoughtChain MCP server over stdio (read + patch-only)")
+    .action(async (dir?: string) => {
+      const globalOpts = program.opts<{ dir?: string }>();
+      const workspace = resolveWorkspaceRoot(dir ?? globalOpts.dir);
+      await runMcpStdioServer(workspace);
+    });
+
+  // ── Phase 2: Patch commands (PRD §7.4) ───────────────────────────────────
+  const patchCmd = program
+    .command("patch")
+    .description("Propose, inspect, apply, or reject graph change patches");
+
+  patchCmd
+    .command("propose <graph>")
+    .description("Validate and submit a patch proposal from a JSON file")
+    .requiredOption("-f, --file <patch.json>", "Path to JSON file containing patch or ops[]")
+    .option("-t, --title <title>", "Override patch title")
+    .option("-r, --rationale <rationale>", "Override patch rationale")
+    .option("-a, --author <author>", "Override patch author")
+    .action(
+      async (
+        graphArg: string,
+        opts: { file: string; title?: string; rationale?: string; author?: string }
+      ) => {
+        const globalOpts = program.opts<{ dir?: string }>();
+        const workspace = resolveWorkspaceRoot(globalOpts.dir);
+        const filePath = path.resolve(opts.file);
+        const parsed = readJsonFile(filePath);
+        if (!parsed.ok) {
+          printJson({ ok: false, code: "JSON_PARSE_ERROR", error: parsed.error });
+          process.exitCode = 1;
+          return;
+        }
+
+        let ops: Op[];
+        let title = opts.title;
+        let rationale = opts.rationale;
+        let author = opts.author;
+
+        if (Array.isArray(parsed.data)) {
+          ops = parsed.data as Op[];
+        } else if (parsed.data && typeof parsed.data === "object") {
+          const obj = parsed.data as Record<string, unknown>;
+          if (!Array.isArray(obj.ops)) {
+            printJson({
+              ok: false,
+              code: "INVALID_PATCH_FILE",
+              error: "Patch JSON must be an ops[] array or an object with an ops[] array"
+            });
+            process.exitCode = 1;
+            return;
+          }
+          ops = obj.ops as Op[];
+          title = title ?? (typeof obj.title === "string" ? obj.title : undefined);
+          rationale =
+            rationale ?? (typeof obj.rationale === "string" ? obj.rationale : undefined);
+          author = author ?? (typeof obj.author === "string" ? obj.author : undefined);
+        } else {
+          printJson({ ok: false, code: "INVALID_PATCH_FILE", error: "Invalid JSON root" });
+          process.exitCode = 1;
+          return;
+        }
+
+        try {
+          const result = await proposePatch({
+            workspaceRoot: workspace,
+            graphId: graphArg,
+            title: title ?? path.basename(filePath, path.extname(filePath)),
+            rationale: rationale ?? "",
+            author: author ?? "cli",
+            ops
+          });
+          printJson({
+            ok: true,
+            patchId: result.patch.id,
+            graphId: result.patch.graphId,
+            baseHash: result.patch.baseHash,
+            file: result.relFile,
+            summary: result.summary,
+            warnings: result.patch.diagnostics
+          });
+        } catch (err) {
+          if (err instanceof ApplyError) {
+            printJson({
+              ok: false,
+              code: "VALIDATION_ERROR",
+              error: err.message,
+              diagnostics: err.diagnostics
+            });
+          } else {
+            printJson({
+              ok: false,
+              code: err instanceof NotFoundError ? "GRAPH_NOT_FOUND" : "PROPOSE_ERROR",
+              error: err instanceof Error ? err.message : String(err)
+            });
+          }
+          process.exitCode = 1;
+        }
+      }
+    );
+
+  patchCmd
+    .command("list [graph]")
+    .description("List pending patch proposals in the workspace")
+    .action((graphArg?: string) => {
+      const globalOpts = program.opts<{ dir?: string }>();
+      const workspace = resolveWorkspaceRoot(globalOpts.dir);
+      const pending = listPendingPatches(workspace, graphArg);
+      printJson({
+        ok: true,
+        workspace,
+        count: pending.length,
+        patches: pending.map((r) => ({
+          id: r.patch.id,
+          graphId: r.patch.graphId,
+          title: r.patch.title,
+          author: r.patch.author,
+          state: r.patch.state,
+          createdAt: r.patch.createdAt,
+          file: r.relFile,
+          opCount: r.patch.ops.length,
+          isStale: r.evaluation?.isStale ?? false,
+          conflictCount: r.evaluation?.conflictCount ?? 0,
+          summary: r.evaluation?.summary
+        }))
+      });
+    });
+
+  patchCmd
+    .command("show <patchId>")
+    .description("Show full details and conflict evaluation of a patch")
+    .action((patchId: string) => {
+      const globalOpts = program.opts<{ dir?: string }>();
+      const workspace = resolveWorkspaceRoot(globalOpts.dir);
+      const rec = findPatchRecord(workspace, patchId);
+      if (!rec) {
+        printJson({ ok: false, code: "PATCH_NOT_FOUND", error: `Patch not found: ${patchId}` });
+        process.exitCode = 1;
+        return;
+      }
+
+      let evaluation = null;
+      if (!rec.archived) {
+        try {
+          const loaded = readValidatedGraph(workspace, rec.patch.graphId);
+          evaluation = evaluatePatchAgainstGraph(loaded.graph, rec.patch, {
+            fileExists: makeFileExistsChecker(workspace)
+          });
+        } catch {
+          evaluation = null;
+        }
+      }
+
+      printJson({
+        ok: true,
+        archived: rec.archived,
+        file: path.relative(workspace, rec.filePath).replace(/\\/g, "/"),
+        patch: rec.patch,
+        evaluation
+      });
+    });
+
+  patchCmd
+    .command("apply <patchId>")
+    .description("Apply a pending patch (all non-conflicted ops or --only 0,2)")
+    .option("--only <indices>", "Comma-separated 0-based op indices to apply (e.g. 0,2)")
+    .action(async (patchId: string, opts: { only?: string }) => {
+      const globalOpts = program.opts<{ dir?: string }>();
+      const workspace = resolveWorkspaceRoot(globalOpts.dir);
+
+      let only: number[] | undefined;
+      if (opts.only !== undefined) {
+        const parts = opts.only
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        const nums = parts.map((p) => Number.parseInt(p, 10));
+        if (nums.length === 0 || nums.some((n) => !Number.isInteger(n) || n < 0)) {
+          printJson({
+            ok: false,
+            code: "INVALID_ONLY",
+            error: `Invalid --only indices: ${opts.only}`
+          });
+          process.exitCode = 1;
+          return;
+        }
+        only = nums;
+      }
+
+      try {
+        const result = await applyPatchById({
+          workspaceRoot: workspace,
+          patchId,
+          only
+        });
+        printJson({
+          ok: true,
+          patchId: result.patch.id,
+          state: result.patch.state,
+          graphId: result.patch.graphId,
+          hash: result.hash,
+          appliedIndices: result.appliedIndices,
+          skippedIndices: result.skippedIndices,
+          savedRev: result.savedRev,
+          warnings: result.warnings
+        });
+      } catch (err) {
+        if (err instanceof ApplyError) {
+          printJson({
+            ok: false,
+            code: "VALIDATION_ERROR",
+            error: err.message,
+            diagnostics: err.diagnostics
+          });
+        } else {
+          printJson({
+            ok: false,
+            code: err instanceof NotFoundError ? "PATCH_NOT_FOUND" : "APPLY_ERROR",
+            error: err instanceof Error ? err.message : String(err)
+          });
+        }
+        process.exitCode = 1;
+      }
+    });
+
+  patchCmd
+    .command("reject <patchId>")
+    .description("Reject a pending patch and move it to patches/archive/")
+    .action(async (patchId: string) => {
+      const globalOpts = program.opts<{ dir?: string }>();
+      const workspace = resolveWorkspaceRoot(globalOpts.dir);
+      try {
+        const patch = await rejectPatchById(workspace, patchId);
+        printJson({
+          ok: true,
+          patchId: patch.id,
+          state: patch.state,
+          graphId: patch.graphId
+        });
+      } catch (err) {
+        printJson({
+          ok: false,
+          code: err instanceof NotFoundError ? "PATCH_NOT_FOUND" : "REJECT_ERROR",
+          error: err instanceof Error ? err.message : String(err)
+        });
+        process.exitCode = 1;
+      }
+    });
+
+  // ── Phase 2: History & Rollback commands (PRD §7.4) ──────────────────────
+  program
+    .command("history <graph>")
+    .description("List saved history snapshots for a graph")
+    .action((graphArg: string) => {
+      const globalOpts = program.opts<{ dir?: string }>();
+      const workspace = resolveWorkspaceRoot(globalOpts.dir);
+      const entries = readHistoryIndex(workspace, graphArg);
+      printJson({
+        ok: true,
+        workspace,
+        graphId: graphArg,
+        count: entries.length,
+        entries
+      });
+    });
+
+  program
+    .command("rollback <graph> <rev>")
+    .description("Rollback a graph to a previous snapshot revision (reversible)")
+    .action(async (graphArg: string, revRaw: string) => {
+      const globalOpts = program.opts<{ dir?: string }>();
+      const workspace = resolveWorkspaceRoot(globalOpts.dir);
+      const rev = Number.parseInt(revRaw.replace(/^rev-?/i, ""), 10);
+      if (!Number.isInteger(rev) || rev <= 0) {
+        printJson({
+          ok: false,
+          code: "INVALID_REV",
+          error: `Invalid revision number: ${revRaw}`
+        });
+        process.exitCode = 1;
+        return;
+      }
+
+      try {
+        const result = await rollbackGraph({
+          workspaceRoot: workspace,
+          graphId: graphArg,
+          rev
+        });
+        printJson({
+          ok: true,
+          graphId: graphArg,
+          rolledBackToRev: result.rolledBackToRev,
+          savedRev: result.savedRev,
+          hash: result.hash,
+          warnings: result.warnings
+        });
+      } catch (err) {
+        printJson({
+          ok: false,
+          code: err instanceof NotFoundError ? "REV_NOT_FOUND" : "ROLLBACK_ERROR",
           error: err instanceof Error ? err.message : String(err)
         });
         process.exitCode = 1;

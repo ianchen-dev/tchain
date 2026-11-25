@@ -18,6 +18,10 @@ export interface ThoughtNodeData extends Record<string, unknown> {
   renderNode: RenderNode;
   view: ViewMode;
   selected: boolean;
+  connectable?: boolean;
+  diffState?: "added" | "modified";
+  statusTransition?: { before: string; after: string };
+  diffTooltip?: string;
   onToggleCollapse: (id: string) => void;
   onDrillInto: (id: string) => void;
   onOpenFirstAttachment: (id: string) => void;
@@ -42,7 +46,17 @@ function StatusIcon({ status }: { status: RenderNode["effectiveStatus"] }) {
 
 export const ThoughtNode = memo(function ThoughtNode(props: NodeProps) {
   const data = props.data as ThoughtNodeData;
-  const { renderNode: rn, view, onToggleCollapse, onDrillInto, onOpenFirstAttachment } = data;
+  const {
+    renderNode: rn,
+    view,
+    connectable,
+    diffState,
+    statusTransition,
+    diffTooltip,
+    onToggleCollapse,
+    onDrillInto,
+    onOpenFirstAttachment
+  } = data;
   const { node, effectiveStatus, dimmed, focusRole, isCollapsed, isContainer } = rn;
   const statusMeta = STATUS_META[effectiveStatus];
   const typeMeta = NODE_TYPE_META[node.type];
@@ -56,7 +70,9 @@ export const ThoughtNode = memo(function ThoughtNode(props: NodeProps) {
     isCollapsed ? "tc-card-collapsed" : "",
     dimmed ? "tc-dimmed" : "",
     focusRole !== "none" ? `tc-focus-${focusRole}` : "",
-    props.selected ? "tc-selected" : ""
+    props.selected ? "tc-selected" : "",
+    diffState === "added" ? "tc-diff-added" : "",
+    diffState === "modified" ? "tc-diff-modified" : ""
   ]
     .filter(Boolean)
     .join(" ");
@@ -65,10 +81,12 @@ export const ThoughtNode = memo(function ThoughtNode(props: NodeProps) {
   const doneCount = rn.statusSummary.done ?? 0;
   const todoCount = rn.statusSummary.todo ?? 0;
   const blockedCount = rn.statusSummary.blocked ?? 0;
+  const handleClass = connectable ? "tc-handle-connect" : "tc-handle-hidden";
 
   return (
     <div
       className={classes}
+      title={diffTooltip}
       style={{
         width: "100%",
         height: "100%",
@@ -81,8 +99,19 @@ export const ThoughtNode = memo(function ThoughtNode(props: NodeProps) {
         }
       }}
     >
-      <Handle type="target" position={Position.Top} className="tc-handle-hidden" />
-      <Handle type="target" position={Position.Left} id="left-t" className="tc-handle-hidden" />
+      <Handle
+        type="target"
+        position={Position.Top}
+        className={handleClass}
+        isConnectable={Boolean(connectable)}
+      />
+      <Handle
+        type="target"
+        position={Position.Left}
+        id="left-t"
+        className={handleClass}
+        isConnectable={Boolean(connectable)}
+      />
 
       <div className="tc-card-header">
         <div className="tc-card-badges">
@@ -104,6 +133,14 @@ export const ThoughtNode = memo(function ThoughtNode(props: NodeProps) {
             <StatusIcon status={effectiveStatus} />
             <span>{statusMeta.shortLabel}</span>
           </span>
+          {diffState === "added" && <span className="tc-diff-pill tc-diff-pill-add">+ 新增</span>}
+          {diffState === "modified" && (
+            <span className="tc-diff-pill tc-diff-pill-mod">
+              {statusTransition
+                ? `${statusTransition.before} → ${statusTransition.after}`
+                : "已修改"}
+            </span>
+          )}
         </div>
 
         <div className="tc-card-actions">
@@ -199,8 +236,19 @@ export const ThoughtNode = memo(function ThoughtNode(props: NodeProps) {
         </div>
       )}
 
-      <Handle type="source" position={Position.Bottom} className="tc-handle-hidden" />
-      <Handle type="source" position={Position.Right} id="right-s" className="tc-handle-hidden" />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className={handleClass}
+        isConnectable={Boolean(connectable)}
+      />
+      <Handle
+        type="source"
+        position={Position.Right}
+        id="right-s"
+        className={handleClass}
+        isConnectable={Boolean(connectable)}
+      />
     </div>
   );
 });

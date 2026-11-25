@@ -2,15 +2,31 @@ import { create } from "zustand";
 import {
   deriveGraph,
   getDefaultCollapsed,
+  toggleOpSelection,
   type Diagnostic,
+  type EdgeKind,
   type Graph,
+  type HistoryEntry,
+  type Op,
   type ViewMode
 } from "@tchain/core";
 import {
+  acceptExternalChangeApi,
+  ApiRequestError,
+  applyPatchApi,
+  createCheckpointApi,
   fetchGraphDetail,
   fetchGraphs,
+  fetchHistory,
+  fetchPendingPatches,
+  postGraphOps,
+  rejectPatchApi,
+  revertExternalChangeApi,
+  rollbackGraphApi,
   type GraphErrorRecord,
-  type GraphSummaryItem
+  type GraphSummaryItem,
+  type PendingExternalChange,
+  type PendingPatchItem
 } from "./api.js";
 
 export type SseStatus = "connecting" | "connected" | "reconnecting";
@@ -19,6 +35,32 @@ export interface PreviewDocState {
   path: string;
   title?: string;
 }
+
+export interface SelectedEdgeState {
+  source: string;
+  target: string;
+  kind: EdgeKind;
+}
+
+export interface UndoStackEntry {
+  label: string;
+  inverse: Op[];
+  forward: Op[];
+}
+
+export type ReviewTarget =
+  | { kind: "patch"; patchId: string }
+  | { kind: "external" }
+  | null;
+
+export interface ToastNotice {
+  id: number;
+  kind: "info" | "success" | "error";
+  message: string;
+  hint?: string;
+}
+
+let toastSeq = 0;
 
 interface WorkbenchState {
   workspaceRoot: string;
@@ -31,6 +73,21 @@ interface WorkbenchState {
   loading: boolean;
   loadError: string | null;
 
+  // Phase 2: Pending patches, external change review, version history, undo/redo
+  pendingPatches: PendingPatchItem[];
+  pendingExternalChange: PendingExternalChange | null;
+  reviewTarget: ReviewTarget;
+  reviewSelectedIndices: number[];
+  historyOpen: boolean;
+  historyEntries: HistoryEntry[];
+  historyLoading: boolean;
+  undoStack: UndoStackEntry[];
+  redoStack: UndoStackEntry[];
+  mutating: boolean;
+  toast: ToastNotice | null;
+  focusStatusNoteNonce: number;
+  confirmDeleteNodeId: string | null;
+
   // View & projection controls
   view: ViewMode;
   drillRoot: string | null;
@@ -42,6 +99,7 @@ interface WorkbenchState {
 
   // Selection, Inspector, Markdown evidence reader
   selectedNodeId: string | null;
+  selectedEdge: SelectedEdgeState | null;
   hoveredNodeId: string | null;
   previewHistory: PreviewDocState[];
   previewIndex: number;
@@ -57,8 +115,35 @@ interface WorkbenchState {
   bootstrap: () => Promise<void>;
   selectGraph: (graphId: string) => Promise<void>;
   refreshActiveGraph: () => Promise<void>;
+  refreshPatches: () => Promise<void>;
+  refreshHistory: () => Promise<void>;
   setLastError: (err: GraphErrorRecord | null) => void;
   setSseStatus: (status: SseStatus) => void;
+
+  // Phase 2 mutations & trust defenses
+  submitOps: (
+    ops: Op[],
+    opts?: { label?: string; snapshotBefore?: boolean; recordUndo?: boolean }
+  ) => Promise<boolean>;
+  undo: () => Promise<void>;
+  redo: () => Promise<void>;
+  openPatchReview: (patchId?: string) => void;
+  openExternalReview: () => void;
+  closeReview: () => void;
+  toggleReviewOp: (index: number, checked: boolean) => void;
+  applyActivePatch: () => Promise<void>;
+  rejectActivePatch: () => Promise<void>;
+  acceptExternalChange: () => Promise<void>;
+  revertExternalChange: () => Promise<void>;
+  openHistory: () => Promise<void>;
+  closeHistory: () => void;
+  createCheckpoint: (title?: string) => Promise<void>;
+  rollbackToRev: (rev: number) => Promise<void>;
+
+  showToast: (kind: ToastNotice["kind"], message: string, hint?: string) => void;
+  clearToast: () => void;
+  requestFocusStatusNote: () => void;
+  setConfirmDeleteNodeId: (nodeId: string | null) => void;
 
   setView: (view: ViewMode) => void;
   drillInto: (nodeId: string | null) => void;
@@ -70,6 +155,7 @@ interface WorkbenchState {
   setDimCrossHierarchyEdges: (dim: boolean) => void;
 
   selectNode: (nodeId: string | null) => void;
+  selectEdge: (edge: SelectedEdgeState | null) => void;
   setHoveredNode: (nodeId: string | null) => void;
   jumpToNode: (nodeId: string) => void;
 
@@ -93,6 +179,20 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   loading: true,
   loadError: null,
 
+  pendingPatches: [],
+  pendingExternalChange: null,
+  reviewTarget: null,
+  reviewSelectedIndices: [],
+  historyOpen: false,
+  historyEntries: [],
+  historyLoading: false,
+  undoStack: [],
+  redoStack: [],
+  mutating: false,
+  toast: null,
+  focusStatusNoteNonce: 0,
+  confirmDeleteNodeId: null,
+
   view: "workspace",
   drillRoot: null,
   collapsedByView: {
@@ -106,6 +206,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   dimCrossHierarchyEdges: false,
 
   selectedNodeId: null,
+  selectedEdge: null,
   hoveredNodeId: null,
   previewHistory: [],
   previewIndex: -1,
@@ -141,7 +242,10 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   selectGraph: async (graphId: string) => {
     set({ loading: true, loadError: null, activeGraphId: graphId });
     try {
-      const detail = await fetchGraphDetail(graphId);
+      const [detail, patchesRes] = await Promise.all([
+        fetchGraphDetail(graphId),
+        fetchPendingPatches(graphId).catch(() => ({ patches: [] as PendingPatchItem[] }))
+      ]);
       const reportCollapsed = detail.graph
         ? getDefaultCollapsed(detail.graph, "report")
         : [];
@@ -151,8 +255,18 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         graphHash: detail.hash,
         warnings: detail.warnings,
         lastError: detail.lastError,
+        pendingExternalChange: detail.pendingExternalChange,
+        pendingPatches: patchesRes.patches,
+        reviewTarget: null,
+        reviewSelectedIndices: [],
+        historyOpen: false,
+        historyEntries: [],
+        undoStack: [],
+        redoStack: [],
         drillRoot: null,
         selectedNodeId: null,
+        selectedEdge: null,
+        confirmDeleteNodeId: null,
         previewHistory: [],
         previewIndex: -1,
         collapsedByView: {
@@ -183,13 +297,23 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           : (list.graphs[0]?.id ?? null);
 
       if (!targetId) {
-        set({ activeGraphId: null, graph: null, graphHash: null, lastError: null });
+        set({
+          activeGraphId: null,
+          graph: null,
+          graphHash: null,
+          lastError: null,
+          pendingExternalChange: null,
+          pendingPatches: []
+        });
         return;
       }
 
-      const detail = await fetchGraphDetail(targetId);
+      const [detail, patchesRes] = await Promise.all([
+        fetchGraphDetail(targetId),
+        fetchPendingPatches(targetId).catch(() => ({ patches: [] as PendingPatchItem[] }))
+      ]);
+
       set((state) => {
-        // Keep current drillRoot only if it still exists as a container
         let nextDrill = state.drillRoot;
         if (nextDrill && detail.graph) {
           const derived = deriveGraph(detail.graph);
@@ -197,6 +321,23 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
             nextDrill = null;
           }
         }
+
+        let nextReview = state.reviewTarget;
+        let nextSelectedIndices = state.reviewSelectedIndices;
+        if (nextReview?.kind === "external" && !detail.pendingExternalChange) {
+          nextReview = null;
+          nextSelectedIndices = [];
+        } else if (nextReview?.kind === "patch") {
+          const targetPatchId = nextReview.patchId;
+          const found = patchesRes.patches.find((p) => p.patch.id === targetPatchId);
+          if (!found) {
+            nextReview = null;
+            nextSelectedIndices = [];
+          } else if (found.evaluation && detail.hash !== state.graphHash) {
+            nextSelectedIndices = found.evaluation.defaultSelectedIndices;
+          }
+        }
+
         return {
           activeGraphId: targetId,
           workspaceRoot: detail.workspaceRoot,
@@ -204,9 +345,17 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           graphHash: detail.hash ?? state.graphHash,
           warnings: detail.warnings,
           lastError: detail.lastError,
+          pendingExternalChange: detail.pendingExternalChange,
+          pendingPatches: patchesRes.patches,
+          reviewTarget: nextReview,
+          reviewSelectedIndices: nextSelectedIndices,
           drillRoot: nextDrill
         };
       });
+
+      if (get().historyOpen) {
+        void get().refreshHistory();
+      }
     } catch (err) {
       set({
         loadError: err instanceof Error ? err.message : String(err)
@@ -214,8 +363,450 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     }
   },
 
+  refreshPatches: async () => {
+    const { activeGraphId } = get();
+    if (!activeGraphId) return;
+    try {
+      const res = await fetchPendingPatches(activeGraphId);
+      set((state) => {
+        let nextReview = state.reviewTarget;
+        let nextSelected = state.reviewSelectedIndices;
+        if (nextReview?.kind === "patch") {
+          const targetPatchId = nextReview.patchId;
+          const found = res.patches.find((p) => p.patch.id === targetPatchId);
+          if (!found) {
+            nextReview = null;
+            nextSelected = [];
+          }
+        }
+        return {
+          pendingPatches: res.patches,
+          reviewTarget: nextReview,
+          reviewSelectedIndices: nextSelected
+        };
+      });
+    } catch {
+      // ignore transient errors
+    }
+  },
+
+  refreshHistory: async () => {
+    const { activeGraphId } = get();
+    if (!activeGraphId) return;
+    set({ historyLoading: true });
+    try {
+      const res = await fetchHistory(activeGraphId);
+      set({ historyEntries: res.entries, historyLoading: false });
+    } catch {
+      set({ historyLoading: false });
+    }
+  },
+
   setLastError: (err) => set({ lastError: err }),
   setSseStatus: (status) => set({ sseStatus: status }),
+
+  showToast: (kind, message, hint) => {
+    const id = ++toastSeq;
+    set({ toast: { id, kind, message, hint } });
+    setTimeout(() => {
+      if (get().toast?.id === id) {
+        set({ toast: null });
+      }
+    }, kind === "error" ? 5000 : 2800);
+  },
+
+  clearToast: () => set({ toast: null }),
+  requestFocusStatusNote: () =>
+    set((state) => ({ focusStatusNoteNonce: state.focusStatusNoteNonce + 1 })),
+  setConfirmDeleteNodeId: (nodeId) => set({ confirmDeleteNodeId: nodeId }),
+
+  submitOps: async (ops, opts) => {
+    const { activeGraphId, graphHash, mutating } = get();
+    if (!activeGraphId || !graphHash || ops.length === 0 || mutating) return false;
+    set({ mutating: true });
+    try {
+      const res = await postGraphOps(activeGraphId, {
+        baseHash: graphHash,
+        ops,
+        source: "manual",
+        title: opts?.label,
+        snapshotBefore: opts?.snapshotBefore
+      });
+
+      set((state) => {
+        const nextUndo =
+          opts?.recordUndo === false
+            ? state.undoStack
+            : [
+                ...state.undoStack.slice(-49),
+                {
+                  label: opts?.label ?? "编辑图谱",
+                  inverse: res.inverse,
+                  forward: ops
+                }
+              ];
+
+        // Clear selectedNodeId if that node was deleted
+        const stillHasSelected =
+          state.selectedNodeId !== null &&
+          res.graph.nodes.some((n) => n.id === state.selectedNodeId);
+
+        const stillHasEdge =
+          state.selectedEdge !== null &&
+          res.graph.edges.some(
+            (e) =>
+              e.source === state.selectedEdge!.source &&
+              e.target === state.selectedEdge!.target
+          );
+
+        return {
+          graph: res.graph,
+          graphHash: res.hash,
+          warnings: res.warnings,
+          lastError: null,
+          undoStack: nextUndo,
+          redoStack: opts?.recordUndo === false ? state.redoStack : [],
+          selectedNodeId: stillHasSelected ? state.selectedNodeId : null,
+          selectedEdge: stillHasEdge ? state.selectedEdge : null,
+          confirmDeleteNodeId: null,
+          mutating: false
+        };
+      });
+
+      void get().refreshPatches();
+      if (get().historyOpen) void get().refreshHistory();
+      if (opts?.label) {
+        get().showToast("success", opts.label);
+      }
+      return true;
+    } catch (err) {
+      set({ mutating: false });
+      if (err instanceof ApiRequestError) {
+        if (err.code === "STALE_BASE") {
+          get().showToast("error", "图谱已被其他修改更新，已自动刷新最新版本，请重试");
+          void get().refreshActiveGraph();
+          return false;
+        }
+        const firstDiag = err.diagnostics?.[0];
+        get().showToast("error", firstDiag?.message ?? err.message, firstDiag?.hint);
+        return false;
+      }
+      get().showToast("error", err instanceof Error ? err.message : String(err));
+      return false;
+    }
+  },
+
+  undo: async () => {
+    const { activeGraphId, graphHash, undoStack, mutating } = get();
+    if (!activeGraphId || !graphHash || undoStack.length === 0 || mutating) return;
+    const entry = undoStack[undoStack.length - 1]!;
+    set({ mutating: true });
+    try {
+      const res = await postGraphOps(activeGraphId, {
+        baseHash: graphHash,
+        ops: entry.inverse,
+        source: "manual",
+        title: `撤销：${entry.label}`
+      });
+      set((state) => ({
+        graph: res.graph,
+        graphHash: res.hash,
+        warnings: res.warnings,
+        lastError: null,
+        undoStack: state.undoStack.slice(0, -1),
+        redoStack: [
+          ...state.redoStack.slice(-49),
+          {
+            label: entry.label,
+            inverse: entry.inverse,
+            forward: res.inverse
+          }
+        ],
+        mutating: false
+      }));
+      void get().refreshPatches();
+      get().showToast("info", `已撤销：${entry.label}`);
+    } catch (err) {
+      set({ mutating: false });
+      if (err instanceof ApiRequestError && err.code === "STALE_BASE") {
+        void get().refreshActiveGraph();
+      }
+      get().showToast("error", err instanceof Error ? err.message : "撤销失败");
+    }
+  },
+
+  redo: async () => {
+    const { activeGraphId, graphHash, redoStack, mutating } = get();
+    if (!activeGraphId || !graphHash || redoStack.length === 0 || mutating) return;
+    const entry = redoStack[redoStack.length - 1]!;
+    set({ mutating: true });
+    try {
+      const res = await postGraphOps(activeGraphId, {
+        baseHash: graphHash,
+        ops: entry.forward,
+        source: "manual",
+        title: `重做：${entry.label}`
+      });
+      set((state) => ({
+        graph: res.graph,
+        graphHash: res.hash,
+        warnings: res.warnings,
+        lastError: null,
+        redoStack: state.redoStack.slice(0, -1),
+        undoStack: [
+          ...state.undoStack.slice(-49),
+          {
+            label: entry.label,
+            inverse: res.inverse,
+            forward: entry.forward
+          }
+        ],
+        mutating: false
+      }));
+      void get().refreshPatches();
+      get().showToast("info", `已重做：${entry.label}`);
+    } catch (err) {
+      set({ mutating: false });
+      if (err instanceof ApiRequestError && err.code === "STALE_BASE") {
+        void get().refreshActiveGraph();
+      }
+      get().showToast("error", err instanceof Error ? err.message : "重做失败");
+    }
+  },
+
+  openPatchReview: (patchId) => {
+    const { pendingPatches } = get();
+    const target = patchId
+      ? pendingPatches.find((p) => p.patch.id === patchId)
+      : pendingPatches[0];
+    if (!target) return;
+    const defaultIndices =
+      target.evaluation?.defaultSelectedIndices ?? target.patch.ops.map((_, i) => i);
+    set({
+      reviewTarget: { kind: "patch", patchId: target.patch.id },
+      reviewSelectedIndices: defaultIndices,
+      historyOpen: false,
+      selectedEdge: null,
+      confirmDeleteNodeId: null,
+      view: get().view === "report" ? "workspace" : get().view
+    });
+  },
+
+  openExternalReview: () => {
+    const { pendingExternalChange } = get();
+    if (!pendingExternalChange) return;
+    set({
+      reviewTarget: { kind: "external" },
+      reviewSelectedIndices: pendingExternalChange.ops.map((_, i) => i),
+      historyOpen: false,
+      selectedEdge: null,
+      confirmDeleteNodeId: null,
+      view: get().view === "report" ? "workspace" : get().view
+    });
+  },
+
+  closeReview: () =>
+    set({
+      reviewTarget: null,
+      reviewSelectedIndices: []
+    }),
+
+  toggleReviewOp: (index, checked) => {
+    const { reviewTarget, pendingPatches, reviewSelectedIndices } = get();
+    if (reviewTarget?.kind !== "patch") return;
+    const item = pendingPatches.find((p) => p.patch.id === reviewTarget.patchId);
+    if (!item) return;
+    const nextSet = toggleOpSelection(
+      item.patch.ops,
+      new Set(reviewSelectedIndices),
+      index,
+      checked
+    );
+    set({ reviewSelectedIndices: [...nextSet].sort((a, b) => a - b) });
+  },
+
+  applyActivePatch: async () => {
+    const { activeGraphId, reviewTarget, reviewSelectedIndices, pendingPatches, mutating } =
+      get();
+    if (!activeGraphId || reviewTarget?.kind !== "patch" || mutating) return;
+    const item = pendingPatches.find((p) => p.patch.id === reviewTarget.patchId);
+    if (!item) return;
+    if (reviewSelectedIndices.length === 0) {
+      get().showToast("error", "请至少勾选一条要应用的变更操作");
+      return;
+    }
+
+    set({ mutating: true });
+    try {
+      const res = await applyPatchApi(
+        activeGraphId,
+        item.patch.id,
+        reviewSelectedIndices
+      );
+      set((state) => ({
+        graph: res.graph,
+        graphHash: res.hash,
+        warnings: res.warnings,
+        lastError: null,
+        reviewTarget: null,
+        reviewSelectedIndices: [],
+        undoStack: [
+          ...state.undoStack.slice(-49),
+          {
+            label: `应用提案「${item.patch.title}」`,
+            inverse: res.inverse,
+            forward: []
+          }
+        ],
+        redoStack: [],
+        mutating: false,
+        fitViewNonce: state.fitViewNonce + 1
+      }));
+      await get().refreshPatches();
+      if (get().historyOpen) await get().refreshHistory();
+      get().showToast(
+        "success",
+        `已应用提案「${item.patch.title}」（${res.appliedIndices.length}/${item.patch.ops.length} 项；快照 rev-${String(res.savedRev.rev).padStart(4, "0")} 已留存）`
+      );
+    } catch (err) {
+      set({ mutating: false });
+      const msg =
+        err instanceof ApiRequestError
+          ? (err.diagnostics?.[0]?.message ?? err.message)
+          : String(err);
+      get().showToast("error", `应用提案失败：${msg}`);
+    }
+  },
+
+  rejectActivePatch: async () => {
+    const { activeGraphId, reviewTarget, pendingPatches, mutating } = get();
+    if (!activeGraphId || reviewTarget?.kind !== "patch" || mutating) return;
+    const item = pendingPatches.find((p) => p.patch.id === reviewTarget.patchId);
+    if (!item) return;
+    set({ mutating: true });
+    try {
+      await rejectPatchApi(activeGraphId, item.patch.id);
+      set({ reviewTarget: null, reviewSelectedIndices: [], mutating: false });
+      await get().refreshPatches();
+      get().showToast("info", `已驳回提案「${item.patch.title}」并归档`);
+    } catch (err) {
+      set({ mutating: false });
+      get().showToast("error", err instanceof Error ? err.message : "驳回失败");
+    }
+  },
+
+  acceptExternalChange: async () => {
+    const { activeGraphId, mutating } = get();
+    if (!activeGraphId || mutating) return;
+    set({ mutating: true });
+    try {
+      const res = await acceptExternalChangeApi(activeGraphId);
+      set((state) => ({
+        graph: res.graph,
+        graphHash: res.hash,
+        warnings: res.warnings,
+        pendingExternalChange: null,
+        reviewTarget: null,
+        reviewSelectedIndices: [],
+        mutating: false,
+        fitViewNonce: state.fitViewNonce + 1
+      }));
+      await get().refreshPatches();
+      if (get().historyOpen) await get().refreshHistory();
+      get().showToast(
+        "success",
+        `已接受外部变更并更新基线（原版本已留存为 rev-${String(res.savedRev.rev).padStart(4, "0")}）`
+      );
+    } catch (err) {
+      set({ mutating: false });
+      get().showToast("error", err instanceof Error ? err.message : "接受外部变更失败");
+    }
+  },
+
+  revertExternalChange: async () => {
+    const { activeGraphId, mutating } = get();
+    if (!activeGraphId || mutating) return;
+    set({ mutating: true });
+    try {
+      const res = await revertExternalChangeApi(activeGraphId);
+      set({
+        graph: res.graph,
+        graphHash: res.hash,
+        warnings: res.warnings,
+        lastError: null,
+        pendingExternalChange: null,
+        reviewTarget: null,
+        reviewSelectedIndices: [],
+        mutating: false
+      });
+      await get().refreshPatches();
+      get().showToast("success", "已一键还原文件至上一份受控基线");
+    } catch (err) {
+      set({ mutating: false });
+      get().showToast("error", err instanceof Error ? err.message : "还原文件失败");
+    }
+  },
+
+  openHistory: async () => {
+    set({
+      historyOpen: true,
+      reviewTarget: null,
+      reviewSelectedIndices: [],
+      selectedEdge: null
+    });
+    await get().refreshHistory();
+  },
+
+  closeHistory: () => set({ historyOpen: false }),
+
+  createCheckpoint: async (title) => {
+    const { activeGraphId, mutating } = get();
+    if (!activeGraphId || mutating) return;
+    set({ mutating: true });
+    try {
+      const res = await createCheckpointApi(activeGraphId, title);
+      set({ mutating: false });
+      await get().refreshHistory();
+      get().showToast(
+        "success",
+        `已保存还原点 rev-${String(res.entry.rev).padStart(4, "0")}`
+      );
+    } catch (err) {
+      set({ mutating: false });
+      get().showToast("error", err instanceof Error ? err.message : "保存还原点失败");
+    }
+  },
+
+  rollbackToRev: async (rev) => {
+    const { activeGraphId, mutating } = get();
+    if (!activeGraphId || mutating) return;
+    set({ mutating: true });
+    try {
+      const res = await rollbackGraphApi(activeGraphId, rev);
+      set((state) => ({
+        graph: res.graph,
+        graphHash: res.hash,
+        warnings: res.warnings,
+        lastError: null,
+        undoStack: [],
+        redoStack: [],
+        selectedNodeId: null,
+        selectedEdge: null,
+        mutating: false,
+        fitViewNonce: state.fitViewNonce + 1
+      }));
+      await Promise.all([get().refreshHistory(), get().refreshPatches()]);
+      get().showToast(
+        "success",
+        `已回退至 rev-${String(rev).padStart(4, "0")}（回退前状态已留存为 rev-${String(
+          res.savedRev.rev
+        ).padStart(4, "0")}，可随时反向回退）`
+      );
+    } catch (err) {
+      set({ mutating: false });
+      get().showToast("error", err instanceof Error ? err.message : "版本回退失败");
+    }
+  },
 
   setView: (view) =>
     set((state) => {
@@ -226,6 +817,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       return {
         view,
         drillRoot: null,
+        reviewTarget: view === "report" ? null : state.reviewTarget,
+        historyOpen: view === "report" ? false : state.historyOpen,
+        selectedEdge: view === "report" ? null : state.selectedEdge,
         collapsedByView: nextCollapsedByView,
         showDiscarded: view === "report" ? false : state.showDiscarded,
         showParked: view === "report" ? false : state.showParked,
@@ -275,7 +869,20 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   setFocusHideDimmed: (hide) => set({ focusHideDimmed: hide }),
   setDimCrossHierarchyEdges: (dim) => set({ dimCrossHierarchyEdges: dim }),
 
-  selectNode: (nodeId) => set({ selectedNodeId: nodeId }),
+  selectNode: (nodeId) =>
+    set({
+      selectedNodeId: nodeId,
+      selectedEdge: nodeId ? null : get().selectedEdge,
+      confirmDeleteNodeId: null
+    }),
+
+  selectEdge: (edge) =>
+    set({
+      selectedEdge: edge,
+      selectedNodeId: edge ? null : get().selectedNodeId,
+      confirmDeleteNodeId: null
+    }),
+
   setHoveredNode: (nodeId) => set({ hoveredNodeId: nodeId }),
 
   jumpToNode: (nodeId) =>
@@ -288,7 +895,6 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       const ancestors = derived.ancestorsMap.get(nodeId) ?? [];
       const eff = derived.effectiveStatus.get(nodeId);
 
-      // If drilled into a subtree that doesn't contain nodeId, exit drillRoot to LCA or root
       let nextDrill = state.drillRoot;
       if (nextDrill && nodeId !== nextDrill) {
         const desc = derived.descendantsMap.get(nextDrill);
@@ -297,7 +903,6 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         }
       }
 
-      // Uncollapse any collapsed ancestors of nodeId so it becomes visible
       const curCollapsed = state.collapsedByView[state.view];
       const ancestorSet = new Set(ancestors);
       const nextCollapsed = curCollapsed.filter((id) => !ancestorSet.has(id));
@@ -305,6 +910,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       return {
         drillRoot: nextDrill,
         selectedNodeId: nodeId,
+        selectedEdge: null,
         showDiscarded: eff === "discarded" ? true : state.showDiscarded,
         showParked: eff === "parked" ? true : state.showParked,
         collapsedByView: {

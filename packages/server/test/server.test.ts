@@ -248,7 +248,7 @@ describe("tchain serve security, file boundaries, SSE hot-reload & tchain list",
     expect(jsFile.status).toBe(403);
   });
 
-  it("pushes SSE graph:updated within 500ms and preserves lastValidGraph on invalid edit", async () => {
+  it("routes valid external edits into external:changed review and preserves lastValidGraph on invalid edit", async () => {
     const dir = makeTempWorkspace();
     const srv = await startWorkbenchServer({
       workspaceRoot: dir,
@@ -307,16 +307,19 @@ describe("tchain serve security, file boundaries, SSE hot-reload & tchain list",
     // Wait briefly so chokidar finishes registering OS watcher on Windows
     await new Promise((r) => setTimeout(r, 150));
 
-    // 1. Valid edit -> expect graph:updated within 500ms
+    // 1. Valid external edit -> expect external:changed within 1s, baseline stays unchanged until accepted
     const parsed = JSON.parse(fs.readFileSync(graphFile, "utf8"));
     parsed.title = "公告采集解析方案决策链（已更新）";
     const t0 = Date.now();
     fs.writeFileSync(graphFile, JSON.stringify(parsed, null, 2), "utf8");
 
-    const updated = await new Promise<{ event: string; at: number }>((resolve, reject) => {
-      const deadline = setTimeout(() => reject(new Error("Timed out waiting for graph:updated")), 2500);
+    const extChanged = await new Promise<{ event: string; at: number }>((resolve, reject) => {
+      const deadline = setTimeout(
+        () => reject(new Error("Timed out waiting for external:changed")),
+        2500
+      );
       const poll = setInterval(() => {
-        const hit = receivedEvents.find((e) => e.event === "graph:updated");
+        const hit = receivedEvents.find((e) => e.event === "external:changed");
         if (hit) {
           clearTimeout(deadline);
           clearInterval(poll);
@@ -324,7 +327,33 @@ describe("tchain serve security, file boundaries, SSE hot-reload & tchain list",
         }
       }, 20);
     });
-    expect(updated.at - t0).toBeLessThan(1000);
+    expect(extChanged.at - t0).toBeLessThan(1000);
+
+    // Accept external change via API -> updates baseline without rewriting file
+    const acceptRes = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port: srv.port,
+          path: "/api/graphs/announcement-pipeline/external/accept",
+          method: "POST",
+          headers: { Authorization: `Bearer ${srv.token}` }
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c) => chunks.push(Buffer.from(c)));
+          res.on("end", () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString("utf8")
+            })
+          );
+        }
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(acceptRes.status).toBe(200);
 
     // 2. Invalid JSON edit -> expect graph:error while preserving lastValidGraph
     fs.writeFileSync(graphFile, "{ invalid json !!!", "utf8");

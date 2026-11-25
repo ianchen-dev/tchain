@@ -6,11 +6,22 @@ import {
   MiniMap,
   ReactFlow,
   useReactFlow,
+  type Connection,
   type Edge as RfEdge,
   type Node as RfNode
 } from "@xyflow/react";
-import { projectGraph, type RenderGraph } from "@tchain/core";
-import { Info } from "lucide-react";
+import {
+  applySelectedPatchOps,
+  computePatchPreviewHighlights,
+  edgeKey,
+  projectGraph,
+  type EdgeKind,
+  type Graph,
+  type PatchPreviewHighlights,
+  type RenderEdge,
+  type RenderGraph
+} from "@tchain/core";
+import { GitPullRequest, Info, Trash2, X } from "lucide-react";
 import { runElkLayout, type LayoutResult } from "../layout/layoutClient.js";
 import { useWorkbenchStore } from "../store.js";
 import { CapsuleNode } from "./CapsuleNode.js";
@@ -30,6 +41,12 @@ const edgeTypes = {
   elk: ElkEdge
 };
 
+const EDGE_KIND_OPTIONS: Array<{ id: EdgeKind; label: string }> = [
+  { id: "flow", label: "主推进 (flow)" },
+  { id: "depends_on", label: "前置依赖 (depends_on)" },
+  { id: "revises", label: "回流修正 (revises)" }
+];
+
 export function WorkbenchCanvas() {
   const graph = useWorkbenchStore((s) => s.graph);
   const view = useWorkbenchStore((s) => s.view);
@@ -40,11 +57,19 @@ export function WorkbenchCanvas() {
   const focusHideDimmed = useWorkbenchStore((s) => s.focusHideDimmed);
   const dimCrossHierarchyEdges = useWorkbenchStore((s) => s.dimCrossHierarchyEdges);
 
+  const reviewTarget = useWorkbenchStore((s) => s.reviewTarget);
+  const pendingPatches = useWorkbenchStore((s) => s.pendingPatches);
+  const pendingExternalChange = useWorkbenchStore((s) => s.pendingExternalChange);
+  const reviewSelectedIndices = useWorkbenchStore((s) => s.reviewSelectedIndices);
+
   const selectedNodeId = useWorkbenchStore((s) => s.selectedNodeId);
+  const selectedEdge = useWorkbenchStore((s) => s.selectedEdge);
   const hoveredNodeId = useWorkbenchStore((s) => s.hoveredNodeId);
   const fitViewNonce = useWorkbenchStore((s) => s.fitViewNonce);
+  const mutating = useWorkbenchStore((s) => s.mutating);
 
   const selectNode = useWorkbenchStore((s) => s.selectNode);
+  const selectEdge = useWorkbenchStore((s) => s.selectEdge);
   const setHoveredNode = useWorkbenchStore((s) => s.setHoveredNode);
   const toggleCollapse = useWorkbenchStore((s) => s.toggleCollapse);
   const drillInto = useWorkbenchStore((s) => s.drillInto);
@@ -53,15 +78,76 @@ export function WorkbenchCanvas() {
   const setShowDiscarded = useWorkbenchStore((s) => s.setShowDiscarded);
   const setShowParked = useWorkbenchStore((s) => s.setShowParked);
   const setLayoutStats = useWorkbenchStore((s) => s.setLayoutStats);
+  const submitOps = useWorkbenchStore((s) => s.submitOps);
 
   const reactFlow = useReactFlow();
   const [layoutResult, setLayoutResult] = useState<LayoutResult | null>(null);
   const [layoutError, setLayoutError] = useState<string | null>(null);
   const latestReqRef = useRef(0);
 
+  const canEdit = view !== "report" && reviewTarget === null;
+
+  // Compute effective preview graph & diff highlights when in Review Mode (PRD §7.6)
+  const { displayGraph, previewHighlights, reviewLabel } = useMemo<{
+    displayGraph: Graph | null;
+    previewHighlights: PatchPreviewHighlights | null;
+    reviewLabel: string | null;
+  }>(() => {
+    if (!graph) {
+      return { displayGraph: null, previewHighlights: null, reviewLabel: null };
+    }
+    if (!reviewTarget) {
+      return { displayGraph: graph, previewHighlights: null, reviewLabel: null };
+    }
+
+    if (reviewTarget.kind === "external" && pendingExternalChange) {
+      const highlights = computePatchPreviewHighlights(
+        graph,
+        pendingExternalChange.nextGraph,
+        pendingExternalChange.ops
+      );
+      return {
+        displayGraph: pendingExternalChange.nextGraph,
+        previewHighlights: highlights,
+        reviewLabel: `正在预览外部修改（${pendingExternalChange.file}）`
+      };
+    }
+
+    if (reviewTarget.kind === "patch") {
+      const item = pendingPatches.find((p) => p.patch.id === reviewTarget.patchId);
+      if (item) {
+        if (reviewSelectedIndices.length === 0) {
+          return {
+            displayGraph: graph,
+            previewHighlights: null,
+            reviewLabel: `正在审查 AI 提案「${item.patch.title}」（未勾选任何变更）`
+          };
+        }
+        try {
+          const applied = applySelectedPatchOps(graph, item.patch, reviewSelectedIndices);
+          const selectedOps = reviewSelectedIndices.map((i) => item.patch.ops[i]!);
+          const highlights = computePatchPreviewHighlights(graph, applied.graph, selectedOps);
+          return {
+            displayGraph: applied.graph,
+            previewHighlights: highlights,
+            reviewLabel: `正在预览 AI 提案「${item.patch.title}」（绿色虚线 = 新增，琥珀光晕 = 修改）`
+          };
+        } catch {
+          return {
+            displayGraph: graph,
+            previewHighlights: null,
+            reviewLabel: `正在审查 AI 提案「${item.patch.title}」（当前勾选存在校验错误）`
+          };
+        }
+      }
+    }
+
+    return { displayGraph: graph, previewHighlights: null, reviewLabel: null };
+  }, [graph, reviewTarget, pendingPatches, pendingExternalChange, reviewSelectedIndices]);
+
   const renderGraph: RenderGraph | null = useMemo(() => {
-    if (!graph) return null;
-    return projectGraph(graph, {
+    if (!displayGraph) return null;
+    return projectGraph(displayGraph, {
       view,
       drillRoot,
       collapsed,
@@ -69,7 +155,7 @@ export function WorkbenchCanvas() {
       showParked,
       focusHideDimmed
     });
-  }, [graph, view, drillRoot, collapsed, showDiscarded, showParked, focusHideDimmed]);
+  }, [displayGraph, view, drillRoot, collapsed, showDiscarded, showParked, focusHideDimmed]);
 
   useEffect(() => {
     if (!renderGraph) {
@@ -97,7 +183,6 @@ export function WorkbenchCanvas() {
     };
   }, [renderGraph, setLayoutStats]);
 
-  // Fit view when layout changes significantly (graph switch, view switch, drillRoot, manual F)
   const prevFitTriggerRef = useRef<string>("");
   useEffect(() => {
     if (!layoutResult) return;
@@ -114,13 +199,13 @@ export function WorkbenchCanvas() {
   const handleOpenFirstAttachment = useCallback(
     (nodeId: string) => {
       selectNode(nodeId);
-      const node = graph?.nodes.find((n) => n.id === nodeId);
+      const node = displayGraph?.nodes.find((n) => n.id === nodeId);
       const firstLocal = node?.attachments?.find((a) => a.path);
       if (firstLocal?.path) {
         openPreviewDoc({ path: firstLocal.path, title: firstLocal.title });
       }
     },
-    [graph, selectNode, openPreviewDoc]
+    [displayGraph, selectNode, openPreviewDoc]
   );
 
   const handleRevealBucket = useCallback(
@@ -131,11 +216,42 @@ export function WorkbenchCanvas() {
     [setShowDiscarded, setShowParked]
   );
 
+  // Handle-to-handle semantic edge creation (PRD §6.6)
+  const handleConnect = useCallback(
+    (conn: Connection) => {
+      if (!canEdit || !conn.source || !conn.target || conn.source === conn.target) return;
+      void submitOps(
+        [
+          {
+            op: "add_edge",
+            source: conn.source,
+            target: conn.target,
+            kind: "flow"
+          }
+        ],
+        { label: `已新增连线 ${conn.source} → ${conn.target}` }
+      );
+    },
+    [canEdit, submitOps]
+  );
+
   const activeFocusTarget = hoveredNodeId ?? selectedNodeId;
 
   const rfNodes: RfNode[] = useMemo(() => {
     if (!layoutResult) return [];
     return layoutResult.nodes.map((pn) => {
+      const diffState = previewHighlights?.addedNodeIds.has(pn.id)
+        ? ("added" as const)
+        : previewHighlights?.modifiedNodeIds.has(pn.id)
+          ? ("modified" as const)
+          : undefined;
+      const statusTransition = previewHighlights?.nodeStatusTransitions.get(pn.id);
+      const fieldChanges = previewHighlights?.nodeFieldChanges.get(pn.id);
+      const diffTooltip =
+        fieldChanges && fieldChanges.length > 0
+          ? fieldChanges.map((c) => `${c.field}: ${c.before} → ${c.after}`).join("\n")
+          : undefined;
+
       if (pn.kind === "container" && pn.renderNode) {
         return {
           id: pn.id,
@@ -151,6 +267,10 @@ export function WorkbenchCanvas() {
           data: {
             renderNode: pn.renderNode,
             view,
+            connectable: canEdit,
+            diffState,
+            statusTransition,
+            diffTooltip,
             onToggleCollapse: toggleCollapse,
             onDrillInto: drillInto,
             onOpenFirstAttachment: handleOpenFirstAttachment
@@ -206,6 +326,10 @@ export function WorkbenchCanvas() {
           renderNode: pn.renderNode!,
           view,
           selected: selectedNodeId === pn.id,
+          connectable: canEdit,
+          diffState,
+          statusTransition,
+          diffTooltip,
           onToggleCollapse: toggleCollapse,
           onDrillInto: drillInto,
           onOpenFirstAttachment: handleOpenFirstAttachment
@@ -216,6 +340,8 @@ export function WorkbenchCanvas() {
     layoutResult,
     selectedNodeId,
     view,
+    canEdit,
+    previewHighlights,
     toggleCollapse,
     drillInto,
     handleOpenFirstAttachment,
@@ -233,28 +359,52 @@ export function WorkbenchCanvas() {
         activeFocusTarget !== null &&
         (re.source === activeFocusTarget || re.target === activeFocusTarget);
 
+      const isSelected =
+        selectedEdge !== null &&
+        re.originalEdges.some(
+          (oe) => oe.source === selectedEdge.source && oe.target === selectedEdge.target
+        );
+
+      const diffAdded =
+        previewHighlights !== null &&
+        re.originalEdges.some((oe) =>
+          previewHighlights.addedEdgeKeys.has(edgeKey(oe.source, oe.target))
+        );
+
       const endpointDimmed =
         view === "focus" &&
         (nodeDimMap.get(re.source) === true || nodeDimMap.get(re.target) === true);
 
       const crossLayerDimmed =
-        dimCrossHierarchyEdges && re.isCrossHierarchy && !connectedToActive;
+        dimCrossHierarchyEdges && re.isCrossHierarchy && !connectedToActive && !isSelected;
 
       return {
         id: pe.id,
         source: re.source,
         target: re.target,
         type: "elk",
-        zIndex: connectedToActive ? 150 : 50,
+        zIndex: isSelected || connectedToActive || diffAdded ? 150 : 50,
         data: {
           renderEdge: re,
           points: pe.points,
           highlighted: connectedToActive,
+          selected: isSelected,
+          diffAdded,
+          clickable: canEdit && !re.isCapsuleEdge && re.originalEdges.length > 0,
           dimmed: endpointDimmed || crossLayerDimmed
         }
       };
     });
-  }, [layoutResult, renderGraph, activeFocusTarget, view, dimCrossHierarchyEdges]);
+  }, [
+    layoutResult,
+    renderGraph,
+    activeFocusTarget,
+    selectedEdge,
+    previewHighlights,
+    view,
+    canEdit,
+    dimCrossHierarchyEdges
+  ]);
 
   return (
     <div className={`tc-canvas-shell ${view === "report" ? "tc-canvas-report" : ""}`}>
@@ -284,6 +434,17 @@ export function WorkbenchCanvas() {
             <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#2563eb" />
           </marker>
           <marker
+            id="tc-arrow-added"
+            viewBox="0 0 10 10"
+            refX="8.5"
+            refY="5"
+            markerWidth="7.5"
+            markerHeight="7.5"
+            orient="auto-start-reverse"
+          >
+            <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill="#10b981" />
+          </marker>
+          <marker
             id="tc-arrow-revises"
             viewBox="0 0 10 10"
             refX="8.5"
@@ -308,10 +469,85 @@ export function WorkbenchCanvas() {
         </defs>
       </svg>
 
-      {view === "focus" && renderGraph?.focus.isFallback && (
+      {reviewLabel && (
+        <div className="tc-canvas-notice tc-canvas-notice-review">
+          <GitPullRequest size={14} />
+          <span>{reviewLabel}</span>
+        </div>
+      )}
+
+      {!reviewLabel && selectedEdge && canEdit && (
+        <div className="tc-edge-toolbar" role="toolbar" aria-label="编辑选中连线">
+          <span className="tc-edge-toolbar-label">
+            连线 <code>{selectedEdge.source}</code> → <code>{selectedEdge.target}</code>
+          </span>
+          <div className="tc-edge-kind-group">
+            {EDGE_KIND_OPTIONS.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                disabled={mutating}
+                className={`tc-tool-btn tc-tool-sm ${
+                  selectedEdge.kind === opt.id ? "tc-tool-active" : ""
+                }`}
+                onClick={() => {
+                  void submitOps(
+                    [
+                      {
+                        op: "add_edge",
+                        source: selectedEdge.source,
+                        target: selectedEdge.target,
+                        kind: opt.id
+                      }
+                    ],
+                    { label: `连线类型已切换为 ${opt.id}` }
+                  ).then((ok) => {
+                    if (ok) selectEdge({ ...selectedEdge, kind: opt.id });
+                  });
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            disabled={mutating}
+            className="tc-tool-btn tc-tool-sm tc-tool-danger"
+            title="删除该连线 (Delete)"
+            onClick={() => {
+              void submitOps(
+                [
+                  {
+                    op: "remove_edge",
+                    source: selectedEdge.source,
+                    target: selectedEdge.target
+                  }
+                ],
+                { label: `已删除连线 ${selectedEdge.source} → ${selectedEdge.target}` }
+              );
+            }}
+          >
+            <Trash2 size={13} />
+            <span>删除</span>
+          </button>
+          <button
+            type="button"
+            className="tc-icon-btn"
+            title="取消选中"
+            onClick={() => selectEdge(null)}
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
+
+      {!reviewLabel && !selectedEdge && view === "focus" && renderGraph?.focus.isFallback && (
         <div className="tc-canvas-notice">
           <Info size={14} />
-          <span>{renderGraph.focus.message ?? "当前没有进行中的节点"} — 已展示就绪前沿与阻塞节点</span>
+          <span>
+            {renderGraph.focus.message ?? "当前没有进行中的节点"} — 已展示就绪前沿与阻塞节点
+          </span>
         </div>
       )}
 
@@ -327,15 +563,28 @@ export function WorkbenchCanvas() {
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         nodesDraggable={false}
-        nodesConnectable={false}
+        nodesConnectable={canEdit}
         elementsSelectable={true}
         panOnScroll={false}
         zoomOnDoubleClick={false}
         minZoom={0.18}
         maxZoom={2.0}
+        onConnect={handleConnect}
         onNodeClick={(_, node) => {
           if (node.type === "thought" || node.type === "container") {
             selectNode(node.id);
+          }
+        }}
+        onEdgeClick={(_, edge) => {
+          if (!canEdit) return;
+          const re = (edge.data as { renderEdge?: RenderEdge } | undefined)?.renderEdge;
+          const first = re?.originalEdges[0];
+          if (first) {
+            selectEdge({
+              source: first.source,
+              target: first.target,
+              kind: first.kind ?? "flow"
+            });
           }
         }}
         onNodeMouseEnter={(_, node) => {
@@ -344,7 +593,10 @@ export function WorkbenchCanvas() {
           }
         }}
         onNodeMouseLeave={() => setHoveredNode(null)}
-        onPaneClick={() => selectNode(null)}
+        onPaneClick={() => {
+          selectNode(null);
+          selectEdge(null);
+        }}
         proOptions={{ hideAttribution: true }}
       >
         <Background

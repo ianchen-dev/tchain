@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { projectGraph, type ViewMode } from "@tchain/core";
+import { projectGraph, type OpSummaryCounts, type ViewMode } from "@tchain/core";
 import {
   AlertOctagon,
   Ban,
@@ -7,15 +7,21 @@ import {
   Crosshair,
   Eye,
   EyeOff,
+  FileWarning,
   GitBranch,
+  GitPullRequest,
+  History,
   Layers,
   Maximize,
   Maximize2,
   Minimize,
   PauseCircle,
   Presentation,
+  Redo2,
+  RotateCcw,
   Search,
   Sparkles,
+  Undo2,
   X
 } from "lucide-react";
 import { useWorkbenchStore } from "../store.js";
@@ -25,6 +31,21 @@ const VIEW_OPTIONS: Array<{ id: ViewMode; label: string; icon: typeof Layers }> 
   { id: "focus", label: "焦点态", icon: Crosshair },
   { id: "report", label: "汇报态", icon: Presentation }
 ];
+
+function formatSummaryBadges(s?: OpSummaryCounts): string {
+  if (!s) return "";
+  const parts: string[] = [];
+  if (s.addedNodes > 0) parts.push(`+${s.addedNodes} 节点`);
+  if (s.removedNodes > 0) parts.push(`-${s.removedNodes} 节点`);
+  if (s.statusChanges > 0) parts.push(`${s.statusChanges} 状态变更`);
+  if (s.updatedNodes > s.statusChanges) {
+    parts.push(`${s.updatedNodes - s.statusChanges} 内容修改`);
+  }
+  if (s.addedAttachments > 0) parts.push(`+${s.addedAttachments} 文档挂载`);
+  if (s.addedEdges > 0) parts.push(`+${s.addedEdges} 连线`);
+  if (s.removedEdges > 0) parts.push(`-${s.removedEdges} 连线`);
+  return parts.length > 0 ? parts.join(" / ") : `${s.totalOps} 项操作`;
+}
 
 export function TopBar() {
   const graphs = useWorkbenchStore((s) => s.graphs);
@@ -43,6 +64,14 @@ export function TopBar() {
   const lastLayoutMs = useWorkbenchStore((s) => s.lastLayoutMs);
   const lastLayoutCacheHit = useWorkbenchStore((s) => s.lastLayoutCacheHit);
 
+  const pendingPatches = useWorkbenchStore((s) => s.pendingPatches);
+  const pendingExternalChange = useWorkbenchStore((s) => s.pendingExternalChange);
+  const reviewTarget = useWorkbenchStore((s) => s.reviewTarget);
+  const historyOpen = useWorkbenchStore((s) => s.historyOpen);
+  const undoStack = useWorkbenchStore((s) => s.undoStack);
+  const redoStack = useWorkbenchStore((s) => s.redoStack);
+  const mutating = useWorkbenchStore((s) => s.mutating);
+
   const selectGraph = useWorkbenchStore((s) => s.selectGraph);
   const setView = useWorkbenchStore((s) => s.setView);
   const drillInto = useWorkbenchStore((s) => s.drillInto);
@@ -53,6 +82,13 @@ export function TopBar() {
   const setDimCrossHierarchyEdges = useWorkbenchStore((s) => s.setDimCrossHierarchyEdges);
   const setCommandPaletteOpen = useWorkbenchStore((s) => s.setCommandPaletteOpen);
   const triggerFitView = useWorkbenchStore((s) => s.triggerFitView);
+  const undo = useWorkbenchStore((s) => s.undo);
+  const redo = useWorkbenchStore((s) => s.redo);
+  const openPatchReview = useWorkbenchStore((s) => s.openPatchReview);
+  const openExternalReview = useWorkbenchStore((s) => s.openExternalReview);
+  const revertExternalChange = useWorkbenchStore((s) => s.revertExternalChange);
+  const openHistory = useWorkbenchStore((s) => s.openHistory);
+  const closeHistory = useWorkbenchStore((s) => s.closeHistory);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [errorExpanded, setErrorExpanded] = useState(false);
@@ -84,6 +120,7 @@ export function TopBar() {
   };
 
   const isReport = view === "report";
+  const latestPatch = pendingPatches[0] ?? null;
 
   return (
     <header className={`tc-topbar-wrap ${isReport ? "tc-topbar-report" : ""}`}>
@@ -179,8 +216,64 @@ export function TopBar() {
               onClick={() => setDimCrossHierarchyEdges(!dimCrossHierarchyEdges)}
             >
               <Sparkles size={14} />
-              <span>跨层降噪</span>
+              <span>跨层</span>
             </button>
+          )}
+
+          {!isReport && (
+            <>
+              <button
+                type="button"
+                className="tc-tool-btn"
+                disabled={undoStack.length === 0 || mutating}
+                title={
+                  undoStack.length > 0
+                    ? `撤销：${undoStack[undoStack.length - 1]!.label} (Ctrl+Z)`
+                    : "暂无可撤销操作 (Ctrl+Z)"
+                }
+                onClick={() => void undo()}
+              >
+                <Undo2 size={14} />
+              </button>
+
+              <button
+                type="button"
+                className="tc-tool-btn"
+                disabled={redoStack.length === 0 || mutating}
+                title={
+                  redoStack.length > 0
+                    ? `重做：${redoStack[redoStack.length - 1]!.label} (Ctrl+Shift+Z)`
+                    : "暂无可重做操作 (Ctrl+Shift+Z)"
+                }
+                onClick={() => void redo()}
+              >
+                <Redo2 size={14} />
+              </button>
+
+              <button
+                type="button"
+                className={`tc-tool-btn ${historyOpen ? "tc-tool-active" : ""}`}
+                title="查看版本历史快照与一键回退"
+                onClick={() => (historyOpen ? closeHistory() : void openHistory())}
+              >
+                <History size={14} />
+                <span>历史</span>
+              </button>
+
+              {pendingPatches.length > 0 && (
+                <button
+                  type="button"
+                  className={`tc-tool-btn tc-tool-patch-badge ${
+                    reviewTarget?.kind === "patch" ? "tc-tool-primary" : ""
+                  }`}
+                  title={`有 ${pendingPatches.length} 份待审 AI 变更提案`}
+                  onClick={() => openPatchReview()}
+                >
+                  <GitPullRequest size={14} />
+                  <span>待审 {pendingPatches.length}</span>
+                </button>
+              )}
+            </>
           )}
 
           <button
@@ -237,7 +330,7 @@ export function TopBar() {
             {!isReport && (
               <span>
                 {sseStatus === "connected"
-                  ? "实时同步"
+                  ? "同步"
                   : sseStatus === "reconnecting"
                     ? "重连中"
                     : "连接中"}
@@ -274,6 +367,67 @@ export function TopBar() {
             })}
           </nav>
           <span className="tc-crumb-hint">按 Esc 返回上一层</span>
+        </div>
+      )}
+
+      {/* Pending External File Edit Banner (PRD §7.6) */}
+      {!isReport && pendingExternalChange && reviewTarget?.kind !== "external" && (
+        <div className="tc-review-banner tc-review-banner-ext" role="status">
+          <div className="tc-review-banner-text">
+            <FileWarning size={15} />
+            <strong>检测到外部直接修改「{pendingExternalChange.file}」</strong>
+            <span>
+              （{formatSummaryBadges(pendingExternalChange.summary)}
+              {pendingExternalChange.metadataChanged ? " / 元数据变更" : ""}）
+            </span>
+          </div>
+          <div className="tc-review-banner-actions">
+            <button
+              type="button"
+              className="tc-btn tc-btn-amber tc-btn-sm"
+              onClick={openExternalReview}
+            >
+              审查外部变更
+            </button>
+            <button
+              type="button"
+              className="tc-btn tc-btn-ghost tc-btn-sm"
+              disabled={mutating}
+              onClick={() => void revertExternalChange()}
+            >
+              <RotateCcw size={12} />
+              <span>一键还原</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Pending AI Patch Notification Banner (PRD §7.6) */}
+      {!isReport && latestPatch && reviewTarget === null && (
+        <div className="tc-review-banner tc-review-banner-patch" role="status">
+          <div className="tc-review-banner-text">
+            <GitPullRequest size={15} />
+            <strong>收到 AI 变更提案「{latestPatch.patch.title}」</strong>
+            <span>
+              （{formatSummaryBadges(latestPatch.evaluation?.summary)}
+              {latestPatch.evaluation?.hasConflicts
+                ? ` · ${latestPatch.evaluation.conflictCount} 项冲突`
+                : ""}
+              ）
+            </span>
+            {pendingPatches.length > 1 && (
+              <span className="tc-id-badge">共 {pendingPatches.length} 份待审</span>
+            )}
+          </div>
+          <div className="tc-review-banner-actions">
+            <button
+              type="button"
+              className="tc-btn tc-btn-primary tc-btn-sm"
+              onClick={() => openPatchReview(latestPatch.patch.id)}
+            >
+              审查变更
+            </button>
+          </div>
         </div>
       )}
 

@@ -7,8 +7,30 @@ import { serve } from "@hono/node-server";
 import { Hono, type Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
-import { compileContext, computeFocus } from "@tchain/core";
+import { z } from "zod";
+import {
+  ApplyError,
+  compileContext,
+  computeFocus,
+  diffGraphs,
+  HistorySourceSchema,
+  OpSchema,
+  summarizeOps
+} from "@tchain/core";
 import { resolveSafeWorkspaceFile } from "./files.js";
+import {
+  applyPatchById,
+  createManualCheckpoint,
+  listPendingPatches,
+  mutateGraph,
+  NotFoundError,
+  proposePatch,
+  readHistoryIndex,
+  readHistorySnapshot,
+  rejectPatchById,
+  rollbackGraph,
+  StaleBaseError
+} from "./storage.js";
 import { WorkspaceStore, type ServerEvent } from "./store.js";
 
 export const TOKEN_COOKIE_NAME = "tchain_token";
@@ -20,6 +42,7 @@ export interface StartServerOptions {
   token?: string;
   webDistDir?: string;
   watch?: boolean;
+  manualSnapshotIdleMs?: number;
 }
 
 export interface RunningServer {
@@ -46,6 +69,33 @@ const STATIC_MIME: Record<string, string> = {
   ".woff": "font/woff",
   ".map": "application/json; charset=utf-8"
 };
+
+const PostOpsBodySchema = z.object({
+  baseHash: z.string().min(1),
+  ops: z.array(OpSchema).min(1),
+  source: HistorySourceSchema.optional(),
+  title: z.string().optional(),
+  snapshotBefore: z.boolean().optional()
+});
+
+const ProposePatchBodySchema = z.object({
+  title: z.string().min(1),
+  rationale: z.string().default(""),
+  author: z.string().optional(),
+  ops: z.array(OpSchema).min(1)
+});
+
+const ApplyPatchBodySchema = z.object({
+  only: z.array(z.number().int().nonnegative()).optional()
+});
+
+const RollbackBodySchema = z.object({
+  rev: z.number().int().positive()
+});
+
+const CheckpointBodySchema = z.object({
+  title: z.string().optional()
+});
 
 function safeTokenEquals(a: string | undefined, b: string): boolean {
   if (!a) return false;
@@ -170,7 +220,7 @@ export function createWorkbenchApp(params: {
     await next();
   });
 
-  // 3. API endpoints
+  // 3. Read API endpoints
   app.get("/api/health", (c) => {
     return c.json({
       ok: true,
@@ -210,7 +260,8 @@ export function createWorkbenchApp(params: {
       graph: entry.lastValidGraph,
       hash: entry.lastValidHash,
       warnings: entry.lastValidWarnings,
-      lastError: entry.lastError
+      lastError: entry.lastError,
+      pendingExternalChange: store.getPendingExternalChange(entry.id)
     });
   });
 
@@ -252,6 +303,440 @@ export function createWorkbenchApp(params: {
           message: err instanceof Error ? err.message : String(err)
         },
         400
+      );
+    }
+  });
+
+  // 4. Unified Write Pipeline API (PRD §7.1 / §8.4)
+  app.post("/api/graphs/:id/ops", async (c) => {
+    const graphId = c.req.param("id");
+    let rawBody: unknown;
+    try {
+      rawBody = await c.req.json();
+    } catch {
+      return c.json({ ok: false, code: "INVALID_JSON", message: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = PostOpsBodySchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return c.json(
+        {
+          ok: false,
+          code: "INVALID_REQUEST",
+          message: "Invalid ops request payload",
+          diagnostics: parsed.error.issues.map((iss) => ({
+            level: "error",
+            path: iss.path.join(".") || "$",
+            code: "SCHEMA_ERROR",
+            message: iss.message
+          }))
+        },
+        400
+      );
+    }
+
+    try {
+      const result = await mutateGraph({
+        workspaceRoot: store.workspaceRoot,
+        graphId,
+        baseHash: parsed.data.baseHash,
+        ops: parsed.data.ops,
+        source: parsed.data.source ?? "manual",
+        title: parsed.data.title,
+        snapshotBefore: parsed.data.snapshotBefore,
+        onBeforeWriteHash: (nextHash) => store.registerOwnWriteHash(graphId, nextHash)
+      });
+
+      store.applyCommittedGraph(graphId, result.graph, result.hash, result.warnings);
+
+      if ((parsed.data.source ?? "manual") === "manual" && !result.savedRev) {
+        store.recordManualEdit(graphId, result.previousGraph, result.graph, parsed.data.ops);
+      }
+
+      return c.json({
+        ok: true,
+        graphId,
+        graph: result.graph,
+        hash: result.hash,
+        inverse: result.inverse,
+        warnings: result.warnings,
+        savedRev: result.savedRev
+      });
+    } catch (err) {
+      if (err instanceof StaleBaseError) {
+        return c.json(
+          {
+            ok: false,
+            code: "STALE_BASE",
+            message: err.message,
+            expectedBaseHash: err.expectedBaseHash,
+            currentHash: err.currentHash
+          },
+          409
+        );
+      }
+      if (err instanceof NotFoundError) {
+        return c.json({ ok: false, code: "GRAPH_NOT_FOUND", message: err.message }, 404);
+      }
+      if (err instanceof ApplyError) {
+        return c.json(
+          {
+            ok: false,
+            code: "VALIDATION_ERROR",
+            message: err.message,
+            diagnostics: err.diagnostics
+          },
+          400
+        );
+      }
+      return c.json(
+        {
+          ok: false,
+          code: "MUTATION_ERROR",
+          message: err instanceof Error ? err.message : String(err)
+        },
+        500
+      );
+    }
+  });
+
+  // 5. Patch Review API (PRD §7.3 / §7.6)
+  app.get("/api/graphs/:id/patches", (c) => {
+    const graphId = c.req.param("id");
+    const patches = listPendingPatches(store.workspaceRoot, graphId).map((rec) => ({
+      patch: rec.patch,
+      file: rec.relFile,
+      evaluation: rec.evaluation ?? null
+    }));
+    return c.json({
+      ok: true,
+      graphId,
+      count: patches.length,
+      patches
+    });
+  });
+
+  app.post("/api/graphs/:id/patches", async (c) => {
+    const graphId = c.req.param("id");
+    let rawBody: unknown;
+    try {
+      rawBody = await c.req.json();
+    } catch {
+      return c.json({ ok: false, code: "INVALID_JSON", message: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = ProposePatchBodySchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return c.json(
+        {
+          ok: false,
+          code: "INVALID_REQUEST",
+          message: "Invalid patch proposal payload",
+          diagnostics: parsed.error.issues.map((iss) => ({
+            level: "error",
+            path: iss.path.join(".") || "$",
+            code: "SCHEMA_ERROR",
+            message: iss.message
+          }))
+        },
+        400
+      );
+    }
+
+    try {
+      const result = await proposePatch({
+        workspaceRoot: store.workspaceRoot,
+        graphId,
+        title: parsed.data.title,
+        rationale: parsed.data.rationale,
+        author: parsed.data.author,
+        ops: parsed.data.ops
+      });
+      store.emit({
+        type: "patches:updated",
+        payload: { graphId, file: path.basename(result.filePath), at: new Date().toISOString() }
+      });
+      return c.json({
+        ok: true,
+        patch: result.patch,
+        file: result.relFile,
+        summary: result.summary
+      });
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        return c.json({ ok: false, code: "GRAPH_NOT_FOUND", message: err.message }, 404);
+      }
+      if (err instanceof ApplyError) {
+        return c.json(
+          {
+            ok: false,
+            code: "VALIDATION_ERROR",
+            message: err.message,
+            diagnostics: err.diagnostics
+          },
+          400
+        );
+      }
+      return c.json(
+        { ok: false, code: "PROPOSE_ERROR", message: err instanceof Error ? err.message : String(err) },
+        500
+      );
+    }
+  });
+
+  app.post("/api/graphs/:id/patches/:patchId/apply", async (c) => {
+    const graphId = c.req.param("id");
+    const patchId = c.req.param("patchId");
+    let rawBody: unknown = {};
+    try {
+      const text = await c.req.text();
+      if (text.trim().length > 0) rawBody = JSON.parse(text);
+    } catch {
+      return c.json({ ok: false, code: "INVALID_JSON", message: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = ApplyPatchBodySchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return c.json({ ok: false, code: "INVALID_REQUEST", message: "Invalid apply options" }, 400);
+    }
+
+    try {
+      const result = await applyPatchById({
+        workspaceRoot: store.workspaceRoot,
+        patchId,
+        only: parsed.data.only,
+        onBeforeWriteHash: (nextHash) => store.registerOwnWriteHash(graphId, nextHash)
+      });
+
+      store.applyCommittedGraph(
+        result.patch.graphId,
+        result.graph,
+        result.hash,
+        result.warnings
+      );
+      store.emit({
+        type: "patches:updated",
+        payload: { graphId: result.patch.graphId, at: new Date().toISOString() }
+      });
+
+      return c.json({
+        ok: true,
+        graph: result.graph,
+        hash: result.hash,
+        inverse: result.inverse,
+        warnings: result.warnings,
+        patch: result.patch,
+        appliedIndices: result.appliedIndices,
+        skippedIndices: result.skippedIndices,
+        savedRev: result.savedRev
+      });
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        return c.json({ ok: false, code: "PATCH_NOT_FOUND", message: err.message }, 404);
+      }
+      if (err instanceof ApplyError) {
+        return c.json(
+          {
+            ok: false,
+            code: "VALIDATION_ERROR",
+            message: err.message,
+            diagnostics: err.diagnostics
+          },
+          400
+        );
+      }
+      return c.json(
+        { ok: false, code: "APPLY_ERROR", message: err instanceof Error ? err.message : String(err) },
+        500
+      );
+    }
+  });
+
+  app.post("/api/graphs/:id/patches/:patchId/reject", async (c) => {
+    const graphId = c.req.param("id");
+    const patchId = c.req.param("patchId");
+    try {
+      const patch = await rejectPatchById(store.workspaceRoot, patchId);
+      store.emit({
+        type: "patches:updated",
+        payload: { graphId, at: new Date().toISOString() }
+      });
+      return c.json({ ok: true, patch });
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        return c.json({ ok: false, code: "PATCH_NOT_FOUND", message: err.message }, 404);
+      }
+      if (err instanceof ApplyError) {
+        return c.json(
+          { ok: false, code: "PATCH_ERROR", message: err.message, diagnostics: err.diagnostics },
+          400
+        );
+      }
+      return c.json(
+        { ok: false, code: "REJECT_ERROR", message: err instanceof Error ? err.message : String(err) },
+        500
+      );
+    }
+  });
+
+  // 6. External Direct Edit Review API (PRD §7.6)
+  app.get("/api/graphs/:id/external", (c) => {
+    const graphId = c.req.param("id");
+    return c.json({
+      ok: true,
+      graphId,
+      pendingExternalChange: store.getPendingExternalChange(graphId)
+    });
+  });
+
+  app.post("/api/graphs/:id/external/accept", async (c) => {
+    const graphId = c.req.param("id");
+    try {
+      const res = await store.acceptExternalChange(graphId);
+      return c.json({ ok: true, graphId, ...res });
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        return c.json({ ok: false, code: "NO_EXTERNAL_CHANGE", message: err.message }, 404);
+      }
+      return c.json(
+        { ok: false, code: "EXTERNAL_ACCEPT_ERROR", message: err instanceof Error ? err.message : String(err) },
+        500
+      );
+    }
+  });
+
+  app.post("/api/graphs/:id/external/revert", async (c) => {
+    const graphId = c.req.param("id");
+    try {
+      const res = await store.revertExternalChange(graphId);
+      return c.json({ ok: true, graphId, ...res });
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        return c.json({ ok: false, code: "NO_BASELINE", message: err.message }, 404);
+      }
+      return c.json(
+        { ok: false, code: "EXTERNAL_REVERT_ERROR", message: err instanceof Error ? err.message : String(err) },
+        500
+      );
+    }
+  });
+
+  // 7. Version History & Reversible Rollback API (PRD §7.6)
+  app.get("/api/graphs/:id/history", (c) => {
+    const graphId = c.req.param("id");
+    const entries = readHistoryIndex(store.workspaceRoot, graphId);
+    return c.json({
+      ok: true,
+      graphId,
+      count: entries.length,
+      entries
+    });
+  });
+
+  app.get("/api/graphs/:id/history/:rev/diff", (c) => {
+    const graphId = c.req.param("id");
+    const rev = Number.parseInt(c.req.param("rev"), 10);
+    if (!Number.isInteger(rev) || rev <= 0) {
+      return c.json({ ok: false, code: "INVALID_REV", message: "Invalid revision number" }, 400);
+    }
+
+    const entry = store.getEntry(graphId);
+    if (!entry || !entry.lastValidGraph) {
+      return c.json({ ok: false, code: "GRAPH_NOT_FOUND", message: `Graph not found: ${graphId}` }, 404);
+    }
+
+    const snapshot = readHistorySnapshot(store.workspaceRoot, graphId, rev);
+    if (!snapshot) {
+      return c.json({ ok: false, code: "REV_NOT_FOUND", message: `Revision ${rev} not found` }, 404);
+    }
+
+    // Ops that rolling back from current -> snapshot would perform
+    const rollbackOps = diffGraphs(entry.lastValidGraph, snapshot);
+    // Ops that happened since snapshot -> current
+    const forwardOps = diffGraphs(snapshot, entry.lastValidGraph);
+
+    return c.json({
+      ok: true,
+      graphId,
+      rev,
+      rollbackOps,
+      forwardOps,
+      rollbackSummary: summarizeOps(rollbackOps),
+      forwardSummary: summarizeOps(forwardOps),
+      snapshotNodeCount: snapshot.nodes.length,
+      currentNodeCount: entry.lastValidGraph.nodes.length
+    });
+  });
+
+  app.post("/api/graphs/:id/history/checkpoint", async (c) => {
+    const graphId = c.req.param("id");
+    let rawBody: unknown = {};
+    try {
+      const text = await c.req.text();
+      if (text.trim().length > 0) rawBody = JSON.parse(text);
+    } catch {
+      return c.json({ ok: false, code: "INVALID_JSON", message: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = CheckpointBodySchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return c.json({ ok: false, code: "INVALID_REQUEST", message: "Invalid checkpoint body" }, 400);
+    }
+
+    try {
+      const entry = await createManualCheckpoint(store.workspaceRoot, graphId, parsed.data.title);
+      return c.json({ ok: true, graphId, entry });
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        return c.json({ ok: false, code: "GRAPH_NOT_FOUND", message: err.message }, 404);
+      }
+      return c.json(
+        { ok: false, code: "CHECKPOINT_ERROR", message: err instanceof Error ? err.message : String(err) },
+        500
+      );
+    }
+  });
+
+  app.post("/api/graphs/:id/rollback", async (c) => {
+    const graphId = c.req.param("id");
+    let rawBody: unknown;
+    try {
+      rawBody = await c.req.json();
+    } catch {
+      return c.json({ ok: false, code: "INVALID_JSON", message: "Invalid JSON body" }, 400);
+    }
+
+    const parsed = RollbackBodySchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return c.json({ ok: false, code: "INVALID_REQUEST", message: "Missing positive integer rev" }, 400);
+    }
+
+    try {
+      const result = await rollbackGraph({
+        workspaceRoot: store.workspaceRoot,
+        graphId,
+        rev: parsed.data.rev,
+        onBeforeWriteHash: (nextHash) => store.registerOwnWriteHash(graphId, nextHash)
+      });
+
+      store.applyCommittedGraph(graphId, result.graph, result.hash, result.warnings);
+
+      return c.json({
+        ok: true,
+        graphId,
+        graph: result.graph,
+        hash: result.hash,
+        rolledBackToRev: result.rolledBackToRev,
+        savedRev: result.savedRev,
+        warnings: result.warnings
+      });
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        return c.json({ ok: false, code: "REV_NOT_FOUND", message: err.message }, 404);
+      }
+      return c.json(
+        { ok: false, code: "ROLLBACK_ERROR", message: err instanceof Error ? err.message : String(err) },
+        500
       );
     }
   });
@@ -314,7 +799,7 @@ export function createWorkbenchApp(params: {
     });
   });
 
-  // 4. Token cookie bootstrap + static frontend serving
+  // Token cookie bootstrap + static frontend serving
   app.get("/", (c) => {
     const queryToken = c.req.query("token");
     if (queryToken !== undefined) {
@@ -363,7 +848,12 @@ export function createWorkbenchApp(params: {
     const resolvedDist = path.resolve(webDistDir);
     const candidate = path.resolve(resolvedDist, reqPath);
     const rel = path.relative(resolvedDist, candidate);
-    if (!rel.startsWith("..") && !path.isAbsolute(rel) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+    if (
+      !rel.startsWith("..") &&
+      !path.isAbsolute(rel) &&
+      fs.existsSync(candidate) &&
+      fs.statSync(candidate).isFile()
+    ) {
       const ext = path.extname(candidate).toLowerCase();
       const buf = fs.readFileSync(candidate);
       return new Response(buf, {
@@ -414,7 +904,9 @@ async function listenWithPortIncrement(
       throw err;
     }
   }
-  throw new Error(`Unable to bind any port in range ${startPort}..${startPort + maxAttempts - 1}`);
+  throw new Error(
+    `Unable to bind any port in range ${startPort}..${startPort + maxAttempts - 1}`
+  );
 }
 
 export async function startWorkbenchServer(
@@ -426,7 +918,9 @@ export async function startWorkbenchServer(
   const token = options.token ?? crypto.randomBytes(24).toString("hex");
   const webDistDir = options.webDistDir ?? resolveDefaultWebDistDir();
 
-  const store = new WorkspaceStore(workspaceRoot);
+  const store = new WorkspaceStore(workspaceRoot, {
+    manualSnapshotIdleMs: options.manualSnapshotIdleMs
+  });
   let boundPort = startPort;
 
   const app = createWorkbenchApp({
