@@ -156,6 +156,7 @@ interface WorkbenchState {
   drillInto: (nodeId: string | null) => void;
   popDrill: () => void;
   toggleCollapse: (nodeId: string) => void;
+  expandAll: () => void;
   setShowDiscarded: (show: boolean) => void;
   setShowParked: (show: boolean) => void;
   setFocusHideDimmed: (hide: boolean) => void;
@@ -887,6 +888,20 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
           ...state.collapsedByView,
           [state.view]: next
         }
+      };
+    }),
+
+  expandAll: () =>
+    set((state) => {
+      if (!state.graph) return state;
+      return {
+        collapsedByView: { ...state.collapsedByView, [state.view]: [] },
+        drillRoot: null,
+        showDiscarded: true,
+        showParked: true,
+        focusHideDimmed: false,
+        fitViewTarget: null,
+        fitViewNonce: state.fitViewNonce + 1
       };
     }),
 

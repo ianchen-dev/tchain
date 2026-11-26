@@ -32,6 +32,11 @@ inspect its children. Manual expansion is retained when switching views during
 the current graph session. Report view also keeps its usual detail-container
 collapse defaults.
 
+The top-bar **全部展开** button expands every container in the current view,
+returns from a drilled subgraph to the whole graph, reveals parked/discarded
+branches, disables focus hiding, and fits the canvas. Other views keep their
+own collapse state. Report view retains its node-type filtering rules.
+
 ```powershell
 node C:/aProject/tchain/packages/server/dist/cli.js serve "C:/your/workspace" --port 4377
 ```

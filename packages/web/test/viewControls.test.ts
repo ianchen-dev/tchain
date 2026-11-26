@@ -55,3 +55,44 @@ describe("default completed-container collapse", () => {
     expect(useWorkbenchStore.getState().collapsedByView[view]).toEqual([]);
   });
 });
+
+describe("expand all", () => {
+  it.each(views)("expands nested containers and resets visibility in %s", (view) => {
+    const withHidden: Graph = { ...graph, nodes: [...graph.nodes,
+      { id: "Parked", parentId: "Root", type: "task", title: "Parked", status: "parked" },
+      { id: "Discarded", parentId: "Root", type: "task", title: "Discarded", status: "discarded" }
+    ] };
+    const collapsedByView = { workspace: ["Root", "Done"], focus: ["Root", "Done"], report: ["Root", "Done"] };
+    useWorkbenchStore.setState({ graph: withHidden, view, collapsedByView, drillRoot: "Done",
+      showParked: false, showDiscarded: false, focusHideDimmed: true,
+      fitViewTarget: { nonce: 0, nodeIds: ["Child"] } });
+    const nonce = useWorkbenchStore.getState().fitViewNonce;
+    useWorkbenchStore.getState().expandAll();
+    const state = useWorkbenchStore.getState();
+    expect(state.collapsedByView[view]).toEqual([]);
+    for (const other of views.filter((v) => v !== view)) {
+      expect(state.collapsedByView[other]).toEqual(collapsedByView[other]);
+    }
+    expect(state.drillRoot).toBeNull();
+    expect(state.showParked).toBe(true);
+    expect(state.showDiscarded).toBe(true);
+    expect(state.focusHideDimmed).toBe(false);
+    expect(state.fitViewTarget).toBeNull();
+    expect(state.fitViewNonce).toBe(nonce + 1);
+    const rendered = projectGraph(withHidden, { view, collapsed: state.collapsedByView[view],
+      showParked: state.showParked, showDiscarded: state.showDiscarded, focusHideDimmed: state.focusHideDimmed });
+    expect(rendered.nodes.every((n) => !n.isCollapsed)).toBe(true);
+    if (view !== "report") {
+      expect(rendered.nodes.map((n) => n.id).sort()).toEqual(withHidden.nodes.map((n) => n.id).sort());
+    }
+    useWorkbenchStore.getState().setView(view === "workspace" ? "focus" : "workspace");
+    useWorkbenchStore.getState().setView(view);
+    expect(useWorkbenchStore.getState().collapsedByView[view]).toEqual([]);
+  });
+
+  it("does nothing before a graph is loaded", () => {
+    const before = useWorkbenchStore.getState();
+    before.expandAll();
+    expect(useWorkbenchStore.getState()).toBe(before);
+  });
+});

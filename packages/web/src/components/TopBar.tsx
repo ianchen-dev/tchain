@@ -7,6 +7,7 @@ import {
   Crosshair,
   Eye,
   EyeOff,
+  ChevronsUpDown,
   FileWarning,
   GitBranch,
   GitPullRequest,
@@ -82,6 +83,7 @@ export function TopBar() {
   const setDimCrossHierarchyEdges = useWorkbenchStore((s) => s.setDimCrossHierarchyEdges);
   const setCommandPaletteOpen = useWorkbenchStore((s) => s.setCommandPaletteOpen);
   const triggerFitView = useWorkbenchStore((s) => s.triggerFitView);
+  const expandAll = useWorkbenchStore((s) => s.expandAll);
   const undo = useWorkbenchStore((s) => s.undo);
   const redo = useWorkbenchStore((s) => s.redo);
   const openPatchReview = useWorkbenchStore((s) => s.openPatchReview);
@@ -176,6 +178,17 @@ export function TopBar() {
         </div>
 
         <div className="tc-topbar-right">
+          <button
+            type="button"
+            className="tc-tool-btn"
+            disabled={!graph}
+            title="展开当前视图全部容器，显示已搁置/已否决分支并返回全图"
+            onClick={expandAll}
+          >
+            <ChevronsUpDown size={14} />
+            <span>全部展开</span>
+          </button>
+
           {view === "focus" && (
             <button
               type="button"
