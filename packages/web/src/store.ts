@@ -254,9 +254,6 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         fetchGraphDetail(graphId),
         fetchPendingPatches(graphId).catch(() => ({ patches: [] as PendingPatchItem[] }))
       ]);
-      const reportCollapsed = detail.graph
-        ? getDefaultCollapsed(detail.graph, "report")
-        : [];
       set({
         workspaceRoot: detail.workspaceRoot,
         graph: detail.graph,
@@ -278,9 +275,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         previewHistory: [],
         previewIndex: -1,
         collapsedByView: {
-          workspace: [],
-          focus: [],
-          report: reportCollapsed
+          workspace: detail.graph ? getDefaultCollapsed(detail.graph, "workspace") : [],
+          focus: detail.graph ? getDefaultCollapsed(detail.graph, "focus") : [],
+          report: detail.graph ? getDefaultCollapsed(detail.graph, "report") : []
         },
         loading: false,
         fitViewNonce: get().fitViewNonce + 1
@@ -844,17 +841,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
 
   setView: (view) =>
     set((state) => {
-      const nextCollapsedByView = { ...state.collapsedByView };
-      if (view === "report" && state.graph && nextCollapsedByView.report.length === 0) {
-        nextCollapsedByView.report = getDefaultCollapsed(state.graph, "report");
-      }
       return {
         view,
         drillRoot: null,
         reviewTarget: view === "report" ? null : state.reviewTarget,
         historyOpen: view === "report" ? false : state.historyOpen,
         selectedEdge: view === "report" ? null : state.selectedEdge,
-        collapsedByView: nextCollapsedByView,
         showDiscarded: view === "report" ? false : state.showDiscarded,
         showParked: view === "report" ? false : state.showParked,
         fitViewNonce: state.fitViewNonce + 1

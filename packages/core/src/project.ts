@@ -120,14 +120,13 @@ function isReportVisibleNode(node: Node): boolean {
 
 /**
  * Computes sensible default collapsed container IDs for a given view mode.
- * - `workspace` / `focus`: empty (everything expanded by default)
+ * - All views: collapse completed containers, keeping their summary visible.
  * - `report`: collapses detail containers (containers explicitly flagged `report: true`,
  *   or containers whose descendants contain no `goal`/`decision`/`option` structural nodes)
  *   so executive view highlights high-level cards (`conclusion` & `metrics`) while keeping
  *   main decision/option framing open.
  */
 export function getDefaultCollapsed(graph: Graph, view: ViewMode): string[] {
-  if (view !== "report") return [];
   const derived = deriveGraph(graph);
   const collapsed: string[] = [];
   const collapsedSet = new Set<string>();
@@ -142,11 +141,13 @@ export function getDefaultCollapsed(graph: Graph, view: ViewMode): string[] {
     const ancestors = derived.ancestorsMap.get(node.id) ?? [];
     if (ancestors.some((a) => collapsedSet.has(a))) continue;
 
-    if (node.report === true) {
+    if (eff === "done" || (view === "report" && node.report === true)) {
       collapsed.push(node.id);
       collapsedSet.add(node.id);
       continue;
     }
+
+    if (view !== "report") continue;
 
     const descendants = derived.descendantsMap.get(node.id) ?? new Set<string>();
     let hasExecutiveChild = false;
@@ -169,7 +170,10 @@ export function getDefaultCollapsed(graph: Graph, view: ViewMode): string[] {
     }
   }
 
-  return collapsed;
+  // Graph storage order need not put parents before children.
+  return collapsed.filter((id) =>
+    !(derived.ancestorsMap.get(id) ?? []).some((ancestor) => collapsedSet.has(ancestor))
+  );
 }
 
 function buildStatusSummary(

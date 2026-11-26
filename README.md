@@ -25,6 +25,13 @@ pnpm --filter tchain exec node dist/cli.js context <graph> --node <id>
 
 ## Shared Web + MCP service
 
+Opening a graph defaults to collapsing completed containers in all three views,
+including containers whose child statuses roll up to `done`. The summary card
+stays visible; completed leaf nodes stay visible. Expand a card individually to
+inspect its children. Manual expansion is retained when switching views during
+the current graph session. Report view also keeps its usual detail-container
+collapse defaults.
+
 ```powershell
 node C:/aProject/tchain/packages/server/dist/cli.js serve "C:/your/workspace" --port 4377
 ```

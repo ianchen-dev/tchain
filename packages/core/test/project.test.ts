@@ -16,6 +16,27 @@ function loadSampleGraph(): Graph {
   return JSON.parse(fs.readFileSync(FIXTURE_PATH, "utf8")) as Graph;
 }
 
+describe("completed container defaults", () => {
+  it.each(["workspace", "focus", "report"] as const)("collapses explicit and rolled-up completion in %s", (view) => {
+    const graph: Graph = {
+      schemaVersion: 1, id: "completed", title: "Completed",
+      nodes: [
+        { id: "Nested", parentId: "Done", type: "option", title: "Nested" },
+        { id: "Leaf", parentId: "Nested", type: "task", title: "Leaf", status: "done" },
+        { id: "Done", type: "goal", title: "Done" },
+        { id: "Explicit", type: "goal", title: "Explicit", status: "done" },
+        { id: "Todo", parentId: "Explicit", type: "task", title: "Todo", status: "todo" },
+        { id: "Active", type: "goal", title: "Active", status: "active" },
+        { id: "Decision", parentId: "Active", type: "decision", title: "Decision", status: "done" },
+        { id: "Standalone", type: "task", title: "Standalone", status: "done" }
+      ], edges: []
+    };
+    expect(getDefaultCollapsed(graph, view)).toEqual(["Done", "Explicit"]);
+    const expanded = projectGraph(graph, { view: "workspace", collapsed: [] });
+    expect(expanded.nodes.map((n) => n.id)).toContain("Leaf");
+  });
+});
+
 describe("projectGraph() — 0 号样板 & 投影流水线", () => {
   const sample = loadSampleGraph();
 
