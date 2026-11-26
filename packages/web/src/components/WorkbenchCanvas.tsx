@@ -5,7 +5,10 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
+  getNodesBounds,
+  getViewportForBounds,
   useReactFlow,
+  useStore,
   type Connection,
   type Edge as RfEdge,
   type Node as RfNode
@@ -66,6 +69,7 @@ export function WorkbenchCanvas() {
   const selectedEdge = useWorkbenchStore((s) => s.selectedEdge);
   const hoveredNodeId = useWorkbenchStore((s) => s.hoveredNodeId);
   const fitViewNonce = useWorkbenchStore((s) => s.fitViewNonce);
+  const fitViewTarget = useWorkbenchStore((s) => s.fitViewTarget);
   const mutating = useWorkbenchStore((s) => s.mutating);
 
   const selectNode = useWorkbenchStore((s) => s.selectNode);
@@ -81,6 +85,8 @@ export function WorkbenchCanvas() {
   const submitOps = useWorkbenchStore((s) => s.submitOps);
 
   const reactFlow = useReactFlow();
+  const viewportWidth = useStore((s) => s.width);
+  const viewportHeight = useStore((s) => s.height);
   const [layoutResult, setLayoutResult] = useState<LayoutResult | null>(null);
   const [layoutError, setLayoutError] = useState<string | null>(null);
   const latestReqRef = useRef(0);
@@ -185,16 +191,43 @@ export function WorkbenchCanvas() {
 
   const prevFitTriggerRef = useRef<string>("");
   useEffect(() => {
-    if (!layoutResult) return;
-    const key = `${renderGraph?.graphId}:${view}:${drillRoot}:${fitViewNonce}`;
-    if (prevFitTriggerRef.current !== key) {
-      prevFitTriggerRef.current = key;
-      const timer = setTimeout(() => {
-        reactFlow.fitView({ padding: view === "report" ? 0.14 : 0.12, duration: 220 });
-      }, 30);
-      return () => clearTimeout(timer);
-    }
-  }, [layoutResult, renderGraph?.graphId, view, drillRoot, fitViewNonce, reactFlow]);
+    // Never consume a focus request using coordinates from the previous projection.
+    if (
+      !layoutResult || layoutResult.renderHash !== renderGraph?.renderHash ||
+      !viewportWidth || !viewportHeight || !reactFlow.viewportInitialized
+    ) return;
+    const targetIds = fitViewTarget?.nonce === fitViewNonce ? fitViewTarget.nodeIds : null;
+    const key = JSON.stringify([
+      renderGraph.graphId, view, drillRoot, fitViewNonce, targetIds,
+      targetIds ? [layoutResult.renderHash, viewportWidth, viewportHeight] : null
+    ]);
+    if (prevFitTriggerRef.current === key) return;
+    const targets = targetIds ? new Set(targetIds) : null;
+    const focusedNodes = layoutResult.nodes.filter((node) => !targets || targets.has(node.id));
+    const nodes = focusedNodes.length > 0 ? focusedNodes : layoutResult.nodes;
+    if (nodes.length === 0) return;
+    // ELK already provides absolute positions and dimensions. Using these directly
+    // avoids racing React Flow's asynchronous internal node/measurement updates.
+    const bounds = getNodesBounds(nodes.map((node) => ({
+      id: node.id, position: { x: node.x, y: node.y },
+      width: node.width, height: node.height, data: {}
+    })));
+    let cancelled = false;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        const viewport = getViewportForBounds(bounds, viewportWidth, viewportHeight,
+          0.05, targetIds ? 1 : 2, targetIds ? 0.2 : view === "report" ? 0.14 : 0.12);
+        void reactFlow.setViewport(viewport, { duration: 220 }).then((applied) => {
+          if (applied && !cancelled) prevFitTriggerRef.current = key;
+        });
+      });
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+    };
+  }, [layoutResult, renderGraph, view, drillRoot, fitViewNonce, fitViewTarget,
+    viewportWidth, viewportHeight, reactFlow]);
 
   const handleOpenFirstAttachment = useCallback(
     (nodeId: string) => {
@@ -567,7 +600,7 @@ export function WorkbenchCanvas() {
         elementsSelectable={true}
         panOnScroll={false}
         zoomOnDoubleClick={false}
-        minZoom={0.18}
+        minZoom={0.05}
         maxZoom={2.0}
         onConnect={handleConnect}
         onNodeClick={(_, node) => {

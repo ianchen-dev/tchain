@@ -1,5 +1,11 @@
 import { create } from "zustand";
 import {
+  patchPreviewGraph,
+  resolveReviewNodeIds,
+  revealReviewNodes,
+  reviewNodeIds
+} from "./reviewNavigation.js";
+import {
   deriveGraph,
   getDefaultCollapsed,
   toggleOpSelection,
@@ -110,6 +116,7 @@ interface WorkbenchState {
   lastLayoutMs: number | null;
   lastLayoutCacheHit: boolean;
   fitViewNonce: number;
+  fitViewTarget: { nonce: number; nodeIds: string[] } | null;
 
   // Actions
   bootstrap: () => Promise<void>;
@@ -216,6 +223,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   lastLayoutMs: null,
   lastLayoutCacheHit: false,
   fitViewNonce: 0,
+  fitViewTarget: null,
 
   bootstrap: async () => {
     set({ loading: true, loadError: null });
@@ -575,40 +583,56 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   },
 
   openPatchReview: (patchId) => {
-    const { pendingPatches } = get();
+    const state = get();
+    const { pendingPatches, graph } = state;
     const target = patchId
       ? pendingPatches.find((p) => p.patch.id === patchId)
       : pendingPatches[0];
     if (!target) return;
     const defaultIndices =
       target.evaluation?.defaultSelectedIndices ?? target.patch.ops.map((_, i) => i);
+    const preview = graph ? patchPreviewGraph(graph, target.patch, defaultIndices) : null;
+    const navigation = graph && preview
+      ? revealReviewNodes(preview, reviewNodeIds(graph, preview,
+          defaultIndices.map((i) => target.patch.ops[i]!)), state)
+      : {};
     set({
+      ...navigation,
       reviewTarget: { kind: "patch", patchId: target.patch.id },
       reviewSelectedIndices: defaultIndices,
       historyOpen: false,
+      selectedNodeId: null,
       selectedEdge: null,
       confirmDeleteNodeId: null,
-      view: get().view === "report" ? "workspace" : get().view
+      view: state.view === "report" ? "workspace" : state.view
     });
   },
 
   openExternalReview: () => {
-    const { pendingExternalChange } = get();
+    const state = get();
+    const { pendingExternalChange, graph } = state;
     if (!pendingExternalChange) return;
+    const navigation = graph
+      ? revealReviewNodes(pendingExternalChange.nextGraph,
+          reviewNodeIds(graph, pendingExternalChange.nextGraph, pendingExternalChange.ops), state)
+      : {};
     set({
+      ...navigation,
       reviewTarget: { kind: "external" },
       reviewSelectedIndices: pendingExternalChange.ops.map((_, i) => i),
       historyOpen: false,
+      selectedNodeId: null,
       selectedEdge: null,
       confirmDeleteNodeId: null,
-      view: get().view === "report" ? "workspace" : get().view
+      view: state.view === "report" ? "workspace" : state.view
     });
   },
 
   closeReview: () =>
     set({
       reviewTarget: null,
-      reviewSelectedIndices: []
+      reviewSelectedIndices: [],
+      fitViewTarget: null
     }),
 
   toggleReviewOp: (index, checked) => {
@@ -622,7 +646,17 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       index,
       checked
     );
-    set({ reviewSelectedIndices: [...nextSet].sort((a, b) => a - b) });
+    const indices = [...nextSet].sort((a, b) => a - b);
+    const state = get();
+    const preview = state.graph ? patchPreviewGraph(state.graph, item.patch, indices) : null;
+    const navigation = state.graph && preview
+      ? revealReviewNodes(preview, reviewNodeIds(state.graph, preview,
+          indices.map((i) => item.patch.ops[i]!)), state)
+      : {};
+    set({
+      ...navigation,
+      reviewSelectedIndices: indices
+    });
   },
 
   applyActivePatch: async () => {
@@ -888,36 +922,21 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   jumpToNode: (nodeId) =>
     set((state) => {
       if (!state.graph) return { selectedNodeId: nodeId };
-      const derived = deriveGraph(state.graph);
-      const target = derived.nodeMap.get(nodeId);
-      if (!target) return {};
-
-      const ancestors = derived.ancestorsMap.get(nodeId) ?? [];
-      const eff = derived.effectiveStatus.get(nodeId);
-
-      let nextDrill = state.drillRoot;
-      if (nextDrill && nodeId !== nextDrill) {
-        const desc = derived.descendantsMap.get(nextDrill);
-        if (!desc?.has(nodeId)) {
-          nextDrill = target.parentId ?? null;
-        }
+      let preview = state.graph;
+      if (state.reviewTarget?.kind === "external" && state.pendingExternalChange) {
+        preview = state.pendingExternalChange.nextGraph;
+      } else if (state.reviewTarget?.kind === "patch") {
+        const patchId = state.reviewTarget.patchId;
+        const item = state.pendingPatches.find((p) => p.patch.id === patchId);
+        if (item) preview = patchPreviewGraph(state.graph, item.patch, state.reviewSelectedIndices);
       }
-
-      const curCollapsed = state.collapsedByView[state.view];
-      const ancestorSet = new Set(ancestors);
-      const nextCollapsed = curCollapsed.filter((id) => !ancestorSet.has(id));
-
+      const ids = resolveReviewNodeIds(state.graph, preview, [nodeId]);
+      if (ids.length === 0) return {};
       return {
-        drillRoot: nextDrill,
-        selectedNodeId: nodeId,
+        ...revealReviewNodes(preview, ids, state),
+        selectedNodeId: ids[0]!,
         selectedEdge: null,
-        showDiscarded: eff === "discarded" ? true : state.showDiscarded,
-        showParked: eff === "parked" ? true : state.showParked,
-        collapsedByView: {
-          ...state.collapsedByView,
-          [state.view]: nextCollapsed
-        },
-        fitViewNonce: state.fitViewNonce + 1
+        confirmDeleteNodeId: null
       };
     }),
 
