@@ -26,6 +26,43 @@ beforeEach(() => {
 });
 
 describe("default completed-container collapse", () => {
+  it.each(["parked", "discarded"] as const)("defaults %s branches to collapsed and allows expansion", async (status) => {
+    const branchGraph: Graph = { ...graph, nodes: [...graph.nodes,
+      { id: "Branch", parentId: "Root", type: "option", title: "Branch", status },
+      { id: "Nested", parentId: "Branch", type: "option", title: "Nested", status: "todo" },
+      { id: "NestedChild", parentId: "Nested", type: "task", title: "Nested child", status: "todo" },
+      { id: "RolledUp", parentId: "Root", type: "option", title: "Rolled up" },
+      { id: "StatusChild", parentId: "RolledUp", type: "task", title: "Status child", status }
+    ] };
+    vi.mocked(fetchGraphDetail).mockResolvedValue({
+      ok: true, graphId: graph.id, file: "view-controls.tgraph.json",
+      graph: branchGraph, hash: "test-hash", workspaceRoot: "test", warnings: [],
+      lastError: null, pendingExternalChange: null
+    });
+    vi.mocked(fetchPendingPatches).mockResolvedValue({ ok: true, graphId: graph.id, count: 0, patches: [] });
+    await useWorkbenchStore.getState().selectGraph(graph.id);
+    for (const view of views) {
+      const state = useWorkbenchStore.getState();
+      expect(state.collapsedByView[view]).toContain("Branch");
+      expect(state.collapsedByView[view]).toContain("RolledUp");
+      expect(state.collapsedByView[view]).not.toContain("Nested");
+      expect(state.collapsedByView[view]).not.toContain("StatusChild");
+      const rendered = projectGraph(branchGraph, { view, collapsed: state.collapsedByView[view],
+        showParked: true, showDiscarded: true });
+      expect(rendered.nodes.find((n) => n.id === "Branch")?.isCollapsed).toBe(true);
+      expect(rendered.nodes.map((n) => n.id)).not.toContain("NestedChild");
+    }
+    useWorkbenchStore.getState().toggleCollapse("Branch");
+    expect(useWorkbenchStore.getState().collapsedByView.workspace).not.toContain("Branch");
+    useWorkbenchStore.getState().expandAll();
+    const state = useWorkbenchStore.getState();
+    const expanded = projectGraph(branchGraph, { view: "workspace", collapsed: state.collapsedByView.workspace,
+      showParked: state.showParked, showDiscarded: state.showDiscarded });
+    expect(expanded.nodes.map((n) => n.id)).toContain("NestedChild");
+    expect(expanded.nodes.map((n) => n.id)).toContain("StatusChild");
+    expect(expanded.nodes.every((n) => !n.isCollapsed)).toBe(true);
+  });
+
   it("initializes every view when opening a graph", async () => {
     vi.mocked(fetchGraphDetail).mockResolvedValue({
       ok: true, graphId: graph.id, file: "view-controls.tgraph.json",

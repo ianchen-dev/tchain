@@ -120,7 +120,7 @@ function isReportVisibleNode(node: Node): boolean {
 
 /**
  * Computes sensible default collapsed container IDs for a given view mode.
- * - All views: collapse completed containers, keeping their summary visible.
+ * - All views: collapse done/parked/discarded containers, keeping their summary visible.
  * - `report`: collapses detail containers (containers explicitly flagged `report: true`,
  *   or containers whose descendants contain no `goal`/`decision`/`option` structural nodes)
  *   so executive view highlights high-level cards (`conclusion` & `metrics`) while keeping
@@ -134,14 +134,16 @@ export function getDefaultCollapsed(graph: Graph, view: ViewMode): string[] {
   for (const node of graph.nodes) {
     if (!derived.isContainer.has(node.id)) continue;
     const eff = derived.effectiveStatus.get(node.id);
-    if (eff === "parked" || eff === "discarded") continue;
 
     // Do not also collapse nested containers whose ancestor is already collapsed,
     // so drilling into or expanding the outer container immediately reveals its full subgraph.
     const ancestors = derived.ancestorsMap.get(node.id) ?? [];
     if (ancestors.some((a) => collapsedSet.has(a))) continue;
 
-    if (eff === "done" || (view === "report" && node.report === true)) {
+    if (
+      eff === "done" || eff === "parked" || eff === "discarded" ||
+      (view === "report" && node.report === true)
+    ) {
       collapsed.push(node.id);
       collapsedSet.add(node.id);
       continue;

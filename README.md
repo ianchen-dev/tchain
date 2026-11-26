@@ -25,9 +25,10 @@ pnpm --filter tchain exec node dist/cli.js context <graph> --node <id>
 
 ## Shared Web + MCP service
 
-Opening a graph defaults to collapsing completed containers in all three views,
-including containers whose child statuses roll up to `done`. The summary card
-stays visible; completed leaf nodes stay visible. Expand a card individually to
+Opening a graph defaults to collapsing completed, parked, and discarded containers
+in all three views, including containers whose child statuses roll up to `done`,
+`parked`, or `discarded`. The summary card stays visible when the view's status
+filters allow it; leaf nodes stay visible under the same filters. Expand a card individually to
 inspect its children. Manual expansion is retained when switching views during
 the current graph session. Report view also keeps its usual detail-container
 collapse defaults.
