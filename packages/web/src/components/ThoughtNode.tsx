@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useLayoutEffect, useRef } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { RenderNode, ViewMode } from "@tchain/core";
 import {
@@ -22,6 +22,8 @@ export interface ThoughtNodeData extends Record<string, unknown> {
   diffState?: "added" | "modified";
   statusTransition?: { before: string; after: string };
   diffTooltip?: string;
+  layoutHash: string;
+  onMeasureHeight: (id: string, layoutHash: string, height: number) => void;
   onToggleCollapse: (id: string) => void;
   onDrillInto: (id: string) => void;
   onOpenFirstAttachment: (id: string) => void;
@@ -53,6 +55,8 @@ export const ThoughtNode = memo(function ThoughtNode(props: NodeProps) {
     diffState,
     statusTransition,
     diffTooltip,
+    layoutHash,
+    onMeasureHeight,
     onToggleCollapse,
     onDrillInto,
     onOpenFirstAttachment
@@ -82,14 +86,32 @@ export const ThoughtNode = memo(function ThoughtNode(props: NodeProps) {
   const todoCount = rn.statusSummary.todo ?? 0;
   const blockedCount = rn.statusSummary.blocked ?? 0;
   const handleClass = connectable ? "tc-handle-connect" : "tc-handle-hidden";
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const card = cardRef.current;
+    if (!card) return;
+    const measure = () => {
+      // offsetHeight ignores canvas zoom; only grow beyond the current ELK box.
+      const height = card.offsetHeight;
+      if (height > Math.ceil(props.height ?? 0)) {
+        onMeasureHeight(rn.id, layoutHash, height);
+      }
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(card);
+    return () => observer.disconnect();
+  }, [rn.id, layoutHash, props.height, onMeasureHeight]);
 
   return (
     <div
+      ref={cardRef}
       className={classes}
       title={diffTooltip}
       style={{
         width: "100%",
-        height: "100%",
+        minHeight: "100%",
         ["--status-accent" as string]: statusMeta.accent
       }}
       onDoubleClick={(e) => {

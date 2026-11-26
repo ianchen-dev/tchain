@@ -24,20 +24,25 @@ function getElk(): InstanceType<typeof ELK> {
   return elkInstance;
 }
 
-export function getLayoutCacheKey(renderGraph: RenderGraph): string {
-  return `${renderGraph.renderHash}::${renderGraph.view}::${renderGraph.direction}`;
+export function getLayoutCacheKey(
+  renderGraph: RenderGraph,
+  measuredContentHeights?: ReadonlyMap<string, number>
+): string {
+  const heights = [...(measuredContentHeights ?? [])].sort(([a], [b]) => a.localeCompare(b));
+  return `${renderGraph.renderHash}::${renderGraph.view}::${renderGraph.direction}::${JSON.stringify(heights)}`;
 }
 
 export async function runElkLayout(
-  renderGraph: RenderGraph
+  renderGraph: RenderGraph,
+  measuredContentHeights?: ReadonlyMap<string, number>
 ): Promise<{ result: LayoutResult; cacheHit: boolean }> {
-  const cacheKey = getLayoutCacheKey(renderGraph);
+  const cacheKey = getLayoutCacheKey(renderGraph, measuredContentHeights);
   const cached = layoutCache.get(cacheKey);
   if (cached) {
     return { result: cached, cacheHit: true };
   }
 
-  const { elkGraph } = buildElkGraph(renderGraph);
+  const { elkGraph } = buildElkGraph(renderGraph, measuredContentHeights);
   const elk = getElk();
   const t0 = performance.now();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

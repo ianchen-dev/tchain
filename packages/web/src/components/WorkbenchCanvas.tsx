@@ -89,6 +89,10 @@ export function WorkbenchCanvas() {
   const viewportHeight = useStore((s) => s.height);
   const [layoutResult, setLayoutResult] = useState<LayoutResult | null>(null);
   const [layoutError, setLayoutError] = useState<string | null>(null);
+  const [nodeMeasurements, setNodeMeasurements] = useState<{
+    renderHash: string;
+    heights: ReadonlyMap<string, number>;
+  } | null>(null);
   const latestReqRef = useRef(0);
 
   const canEdit = view !== "report" && reviewTarget === null;
@@ -163,6 +167,19 @@ export function WorkbenchCanvas() {
     });
   }, [displayGraph, view, drillRoot, collapsed, showDiscarded, showParked, focusHideDimmed]);
 
+  const measuredContentHeights = nodeMeasurements?.renderHash === renderGraph?.renderHash
+    ? nodeMeasurements?.heights
+    : undefined;
+  const handleMeasureHeight = useCallback((id: string, layoutHash: string, height: number) => {
+    // Measurements from the preceding projection must not size newly edited cards.
+    if (layoutHash !== renderGraph?.renderHash) return;
+    setNodeMeasurements((previous) => {
+      const heights = previous?.renderHash === layoutHash ? previous.heights : new Map<string, number>();
+      if ((heights.get(id) ?? 0) >= height) return previous;
+      return { renderHash: layoutHash, heights: new Map(heights).set(id, height) };
+    });
+  }, [renderGraph?.renderHash]);
+
   useEffect(() => {
     if (!renderGraph) {
       setLayoutResult(null);
@@ -172,7 +189,7 @@ export function WorkbenchCanvas() {
     const reqId = ++latestReqRef.current;
     let cancelled = false;
 
-    runElkLayout(renderGraph)
+    runElkLayout(renderGraph, measuredContentHeights)
       .then(({ result, cacheHit }) => {
         if (cancelled || reqId !== latestReqRef.current) return;
         setLayoutResult(result);
@@ -187,7 +204,7 @@ export function WorkbenchCanvas() {
     return () => {
       cancelled = true;
     };
-  }, [renderGraph, setLayoutStats]);
+  }, [renderGraph, measuredContentHeights, setLayoutStats]);
 
   const prevFitTriggerRef = useRef<string>("");
   useEffect(() => {
@@ -301,6 +318,8 @@ export function WorkbenchCanvas() {
             renderNode: pn.renderNode,
             view,
             connectable: canEdit,
+            layoutHash: layoutResult.renderHash,
+            onMeasureHeight: handleMeasureHeight,
             diffState,
             statusTransition,
             diffTooltip,
@@ -360,6 +379,8 @@ export function WorkbenchCanvas() {
           view,
           selected: selectedNodeId === pn.id,
           connectable: canEdit,
+          layoutHash: layoutResult.renderHash,
+          onMeasureHeight: handleMeasureHeight,
           diffState,
           statusTransition,
           diffTooltip,
@@ -374,6 +395,7 @@ export function WorkbenchCanvas() {
     selectedNodeId,
     view,
     canEdit,
+    handleMeasureHeight,
     previewHighlights,
     toggleCollapse,
     drillInto,

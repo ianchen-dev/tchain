@@ -96,17 +96,15 @@ export function estimateNodeSize(rn: RenderNode, view: ViewMode): NodeSize {
   let height = isReport ? 58 : 48;
 
   // Title lines
-  const titleLines = estimateWrappedLines(rn.node.title, innerWidth, titleFont, 3);
+  const titleLines = estimateWrappedLines(rn.node.title, innerWidth, titleFont);
   height += titleLines * titleLineHeight;
 
   // Conclusion or compact description preview
   if (rn.node.conclusion) {
-    const maxConclusionLines = isReport ? 4 : 2;
     const cLines = estimateWrappedLines(
       rn.node.conclusion,
       innerWidth - 16,
-      bodyFont,
-      maxConclusionLines
+      bodyFont
     );
     // Match the conclusion's vertical padding (5px / 7px per side) and the card gap.
     height += (isReport ? 14 : 10) + cLines * bodyLineHeight + 6;

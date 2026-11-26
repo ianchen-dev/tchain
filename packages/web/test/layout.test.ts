@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { getDefaultCollapsed, projectGraph, type Graph } from "@tchain/core";
 import { buildElkGraph, flattenElkOutput, type ElkNodeOutput } from "../src/layout/elkGraph.js";
 import { estimateNodeSize } from "../src/layout/sizing.js";
+import { getLayoutCacheKey } from "../src/layout/layoutClient.js";
 
 const FIXTURE_PATH = path.resolve(
   import.meta.dirname,
@@ -34,7 +35,7 @@ describe("Web ELK Layout Engine & Sizing (0 号样板 smoke tests)", () => {
     expect(sWs.height).toBeGreaterThanOrEqual(78);
   });
 
-  it("keeps the workspace K2 card compact with a two-line conclusion and one row of metrics", () => {
+  it("allocates the full three-line conclusion and metrics on the workspace K2 card", () => {
     const graph = projectGraph(sample, { view: "workspace" });
     const k2 = graph.nodes.find((node) => node.id === "K2")!;
     const card = {
@@ -45,7 +46,66 @@ describe("Web ELK Layout Engine & Sizing (0 号样板 smoke tests)", () => {
       }
     };
 
-    expect(estimateNodeSize(card, "workspace")).toEqual({ width: 268, height: 146 });
+    expect(estimateNodeSize(card, "workspace")).toEqual({ width: 268, height: 163 });
+  });
+
+  it.each(["workspace", "focus", "report"] as const)(
+    "grows leaf and collapsed cards for every title and conclusion line in %s",
+    (view) => {
+      const node = projectGraph(sample, { view: "workspace" }).nodes.find((n) => n.id === "K2")!;
+      for (const isCollapsed of [false, true]) {
+        const short = { ...node, isCollapsed, node: { ...node.node, title: "标题", conclusion: "结论" } };
+        const long = {
+          ...short,
+          node: {
+            ...short.node,
+            title: Array(12).fill("标题").join("\n"),
+            conclusion: Array(12).fill("结论").join("\n")
+          }
+        };
+        const shortSize = estimateNodeSize(short, view);
+        const longSize = estimateNodeSize(long, view);
+        expect(longSize.width).toBe(shortSize.width);
+        expect(longSize.height - shortSize.height).toBe(11 * (view === "report" ? 22 + 19 : 19 + 17));
+      }
+    }
+  );
+
+  it("includes measured heights in layout cache keys regardless of measurement order", () => {
+    const graph = projectGraph(sample, { view: "workspace" });
+    const heights = new Map([["K2", 350], ["H9", 400]]);
+    expect(getLayoutCacheKey(graph, heights)).not.toBe(getLayoutCacheKey(graph));
+    expect(getLayoutCacheKey(graph, heights)).toBe(
+      getLayoutCacheKey(graph, new Map([...heights].reverse()))
+    );
+    expect(getLayoutCacheKey(graph, new Map([["K2", 360], ["H9", 400]]))).not.toBe(
+      getLayoutCacheKey(graph, heights)
+    );
+  });
+
+  it("routes edges and sizes containers around measured card heights", async () => {
+    const graph: Graph = {
+      schemaVersion: 1, id: "long-text", title: "Long text",
+      nodes: [
+        { id: "Container", type: "goal", title: "Container" },
+        { id: "a", parentId: "Container", type: "decision", title: "Long card", status: "done" },
+        { id: "b", parentId: "Container", type: "decision", title: "Next card", status: "done" }
+      ],
+      edges: [{ source: "a", target: "b", kind: "flow" }]
+    };
+    const renderGraph = projectGraph(graph, { view: "workspace", collapsed: [] });
+    const { elkGraph } = buildElkGraph(renderGraph, new Map([["a", 450], ["b", 1], ["Container", 180]]));
+    const out = await elk.layout(elkGraph as Parameters<typeof elk.layout>[0]) as ElkNodeOutput;
+    const result = flattenElkOutput(renderGraph, out, 0);
+    const a = result.nodes.find((n) => n.id === "a")!;
+    const b = result.nodes.find((n) => n.id === "b")!;
+    const container = result.nodes.find((n) => n.id === "Container")!;
+    expect(a.height).toBe(450);
+    expect(a.y).toBeGreaterThanOrEqual(container.y + 180);
+    expect(b.height).toBeGreaterThanOrEqual(78);
+    expect(b.y).toBeGreaterThan(a.y + a.height);
+    expect(container.y + container.height).toBeGreaterThan(b.y + b.height);
+    expect(result.edges[0]!.points[0]!.y).toBe(a.y + a.height);
   });
 
   it("layouts full workspace, report, collapsed, and drilled views with valid absolute edge points in <300ms", async () => {

@@ -115,8 +115,13 @@ function findLcaContainer(
  * - Uses `INCLUDE_CHILDREN`, model-order preservation, and fixed random seed (PRD §8.3).
  * - Places every edge on the LCA container of its endpoints so ELK routes cross-layer
  *   edges accurately without violating hierarchy constraints.
+ * - Measured heights cover the full card for leaves/collapsed containers, or the
+ *   heading and child clearance for expanded containers.
  */
-export function buildElkGraph(renderGraph: RenderGraph): {
+export function buildElkGraph(
+  renderGraph: RenderGraph,
+  measuredContentHeights?: ReadonlyMap<string, number>
+): {
   elkGraph: ElkNodeInput;
   edgeLcaMap: Map<string, string>;
 } {
@@ -149,6 +154,7 @@ export function buildElkGraph(renderGraph: RenderGraph): {
 
     if (isExpandedContainer) {
       const pad = getContainerPadding(rn, renderGraph.view);
+      pad.top = Math.max(pad.top, measuredContentHeights?.get(rn.id) ?? 0);
       elkNode = {
         id: rn.id,
         layoutOptions: {
@@ -167,7 +173,7 @@ export function buildElkGraph(renderGraph: RenderGraph): {
       elkNode = {
         id: rn.id,
         width: size.width,
-        height: size.height
+        height: Math.max(size.height, measuredContentHeights?.get(rn.id) ?? 0)
       };
     }
 

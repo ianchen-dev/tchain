@@ -1,8 +1,9 @@
-import { memo } from "react";
+import { memo, useLayoutEffect, useRef } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { RenderNode, ViewMode } from "@tchain/core";
 import { ChevronUp, Maximize2, Paperclip } from "lucide-react";
 import { NODE_TYPE_META, STATUS_META } from "./statusMeta.js";
+import { getContainerPadding } from "../layout/sizing.js";
 
 export interface ContainerNodeData extends Record<string, unknown> {
   renderNode: RenderNode;
@@ -11,6 +12,8 @@ export interface ContainerNodeData extends Record<string, unknown> {
   diffState?: "added" | "modified";
   statusTransition?: { before: string; after: string };
   diffTooltip?: string;
+  layoutHash: string;
+  onMeasureHeight: (id: string, layoutHash: string, height: number) => void;
   onToggleCollapse: (id: string) => void;
   onDrillInto: (id: string) => void;
   onOpenFirstAttachment: (id: string) => void;
@@ -25,6 +28,8 @@ export const ContainerNode = memo(function ContainerNode(props: NodeProps) {
     diffState,
     statusTransition,
     diffTooltip,
+    layoutHash,
+    onMeasureHeight,
     onToggleCollapse,
     onDrillInto,
     onOpenFirstAttachment
@@ -50,6 +55,22 @@ export const ContainerNode = memo(function ContainerNode(props: NodeProps) {
     .join(" ");
 
   const handleClass = connectable ? "tc-handle-connect" : "tc-handle-hidden";
+  const headingRef = useRef<HTMLDivElement>(null);
+  const estimatedTop = getContainerPadding(rn, view).top;
+
+  useLayoutEffect(() => {
+    const heading = headingRef.current;
+    if (!heading) return;
+    const measure = () => {
+      // Reserve space between the entire heading and the first child node.
+      const height = heading.offsetHeight + (isReport ? 24 : 16);
+      if (height > estimatedTop) onMeasureHeight(rn.id, layoutHash, height);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(heading);
+    return () => observer.disconnect();
+  }, [rn.id, layoutHash, isReport, estimatedTop, onMeasureHeight]);
 
   return (
     <div
@@ -72,95 +93,97 @@ export const ContainerNode = memo(function ContainerNode(props: NodeProps) {
         isConnectable={Boolean(connectable)}
       />
 
-      <div className="tc-container-header">
-        <div className="tc-container-title-group">
-          <span
-            className="tc-type-badge"
-            style={{ background: typeMeta.badgeBg, color: typeMeta.badgeText }}
-          >
-            {typeMeta.label}
-          </span>
-          <span className="tc-id-badge">{node.id}</span>
-          <span className={`tc-container-title ${effectiveStatus === "discarded" ? "tc-strike" : ""}`}>
-            {node.title}
-          </span>
-          <span
-            className="tc-status-pill"
-            style={{
-              background: statusMeta.bg,
-              color: statusMeta.text,
-              borderColor: statusMeta.border
-            }}
-          >
-            {statusMeta.shortLabel}
-          </span>
-          {diffState === "added" && <span className="tc-diff-pill tc-diff-pill-add">+ 新增</span>}
-          {diffState === "modified" && (
-            <span className="tc-diff-pill tc-diff-pill-mod">
-              {statusTransition
-                ? `${statusTransition.before} → ${statusTransition.after}`
-                : "已修改"}
+      <div ref={headingRef} className="tc-container-heading">
+        <div className="tc-container-header">
+          <div className="tc-container-title-group">
+            <span
+              className="tc-type-badge"
+              style={{ background: typeMeta.badgeBg, color: typeMeta.badgeText }}
+            >
+              {typeMeta.label}
             </span>
-          )}
-        </div>
-
-        <div className="tc-container-actions">
-          {attachCount > 0 && (
-            <button
-              type="button"
-              className="tc-icon-chip"
-              title={`查看 ${attachCount} 份关联文档`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenFirstAttachment(rn.id);
+            <span className="tc-id-badge">{node.id}</span>
+            <span className={`tc-container-title ${effectiveStatus === "discarded" ? "tc-strike" : ""}`}>
+              {node.title}
+            </span>
+            <span
+              className="tc-status-pill"
+              style={{
+                background: statusMeta.bg,
+                color: statusMeta.text,
+                borderColor: statusMeta.border
               }}
             >
-              <Paperclip size={11} />
-              <span>{attachCount}</span>
-            </button>
-          )}
-          <button
-            type="button"
-            className="tc-icon-btn"
-            title="折叠容器"
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleCollapse(rn.id);
-            }}
-          >
-            <ChevronUp size={13} />
-          </button>
-          <button
-            type="button"
-            className="tc-icon-btn"
-            title="钻入此容器（也可双击标题栏）"
-            onClick={(e) => {
-              e.stopPropagation();
-              onDrillInto(rn.id);
-            }}
-          >
-            <Maximize2 size={12} />
-          </button>
-        </div>
-      </div>
+              {statusMeta.shortLabel}
+            </span>
+            {diffState === "added" && <span className="tc-diff-pill tc-diff-pill-add">+ 新增</span>}
+            {diffState === "modified" && (
+              <span className="tc-diff-pill tc-diff-pill-mod">
+                {statusTransition
+                  ? `${statusTransition.before} → ${statusTransition.after}`
+                  : "已修改"}
+              </span>
+            )}
+          </div>
 
-      {((node.metrics && node.metrics.length > 0) || (isReport && node.conclusion)) && (
-        <div className="tc-container-subbar">
-          {node.metrics && node.metrics.length > 0 && (
-            <div className="tc-metrics-row">
-              {node.metrics.map((m, idx) => (
-                <span key={idx} className={`tc-metric-pill tc-metric-${m.tone ?? "neutral"}`}>
-                  <span className="tc-metric-label">{m.label}</span>
-                  <span className="tc-metric-val">{m.value}</span>
-                </span>
-              ))}
-            </div>
-          )}
-          {isReport && node.conclusion && (
-            <div className="tc-container-conclusion">{node.conclusion}</div>
-          )}
+          <div className="tc-container-actions">
+            {attachCount > 0 && (
+              <button
+                type="button"
+                className="tc-icon-chip"
+                title={`查看 ${attachCount} 份关联文档`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenFirstAttachment(rn.id);
+                }}
+              >
+                <Paperclip size={11} />
+                <span>{attachCount}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className="tc-icon-btn"
+              title="折叠容器"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleCollapse(rn.id);
+              }}
+            >
+              <ChevronUp size={13} />
+            </button>
+            <button
+              type="button"
+              className="tc-icon-btn"
+              title="钻入此容器（也可双击标题栏）"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDrillInto(rn.id);
+              }}
+            >
+              <Maximize2 size={12} />
+            </button>
+          </div>
         </div>
-      )}
+
+        {((node.metrics && node.metrics.length > 0) || (isReport && node.conclusion)) && (
+          <div className="tc-container-subbar">
+            {node.metrics && node.metrics.length > 0 && (
+              <div className="tc-metrics-row">
+                {node.metrics.map((m, idx) => (
+                  <span key={idx} className={`tc-metric-pill tc-metric-${m.tone ?? "neutral"}`}>
+                    <span className="tc-metric-label">{m.label}</span>
+                    <span className="tc-metric-val">{m.value}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+            {isReport && node.conclusion && (
+              <div className="tc-container-conclusion">{node.conclusion}</div>
+            )}
+          </div>
+        )}
+      </div>
 
       <Handle
         type="source"
