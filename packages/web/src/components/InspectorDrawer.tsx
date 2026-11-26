@@ -13,6 +13,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Clock,
   Code2,
   Copy,
   ExternalLink,
@@ -25,6 +26,7 @@ import {
   X
 } from "lucide-react";
 import { useWorkbenchStore } from "../store.js";
+import { formatFullLocalTime, formatRelativeTime } from "../utils/time.js";
 import { MarkdownPreview } from "./MarkdownPreview.js";
 import { NODE_TYPE_META, STATUS_META } from "./statusMeta.js";
 
@@ -126,6 +128,28 @@ export function InspectorDrawer() {
     }
   }, [focusStatusNoteNonce, canEdit]);
 
+  const isContainer = node && derived ? derived.isContainer.has(node.id) : false;
+  const subtreeUpdatedAt =
+    node && isContainer && derived ? derived.subtreeUpdatedAt.get(node.id) : undefined;
+
+  const timestampItems = useMemo(() => {
+    if (!node) return [];
+    const items: Array<{ key: string; label: string; value: string }> = [];
+    if (node.createdAt) {
+      items.push({ key: "createdAt", label: "创建", value: node.createdAt });
+    }
+    if (node.updatedAt) {
+      items.push({ key: "updatedAt", label: "更新", value: node.updatedAt });
+    }
+    if (node.statusChangedAt) {
+      items.push({ key: "statusChangedAt", label: "状态变更", value: node.statusChangedAt });
+    }
+    if (isContainer && subtreeUpdatedAt && subtreeUpdatedAt !== node.updatedAt) {
+      items.push({ key: "subtreeUpdatedAt", label: "子树更新", value: subtreeUpdatedAt });
+    }
+    return items;
+  }, [node, isContainer, subtreeUpdatedAt]);
+
   // Yield right dock to PatchReviewDrawer or HistoryDrawer when active
   if (reviewTarget !== null || historyOpen) {
     return hasPreview ? (
@@ -144,7 +168,6 @@ export function InspectorDrawer() {
     node && derived ? derived.inheritedStatusFrom.get(node.id) : undefined;
   const inheritedFromNode =
     inheritedFromId && derived ? derived.nodeMap.get(inheritedFromId) : undefined;
-  const isContainer = node && derived ? derived.isContainer.has(node.id) : false;
   const isCollapsed = node ? collapsed.includes(node.id) : false;
 
   const incoming = node && derived ? (derived.incomingEdges.get(node.id) ?? []) : [];
@@ -377,6 +400,29 @@ export function InspectorDrawer() {
                   {isCollapsed ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
                   <span>{isCollapsed ? "展开容器" : "折叠容器"}</span>
                 </button>
+              </div>
+            )}
+
+            {(timestampItems.length > 0 || !isReport) && (
+              <div className="tc-insp-timestamps">
+                {timestampItems.length > 0 ? (
+                  timestampItems.map((item) => (
+                    <span
+                      key={item.key}
+                      className="tc-insp-time-item"
+                      title={`${item.label}：${formatFullLocalTime(item.value)}`}
+                    >
+                      <Clock size={11} />
+                      <span className="tc-insp-time-label">{item.label}</span>
+                      <span>{formatRelativeTime(item.value)}</span>
+                    </span>
+                  ))
+                ) : (
+                  <span className="tc-insp-time-empty">
+                    <Clock size={11} />
+                    <span>暂无时间记录（编辑后自动记录）</span>
+                  </span>
+                )}
               </div>
             )}
 

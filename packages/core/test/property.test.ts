@@ -318,4 +318,39 @@ describe("core property-based tests (fast-check)", () => {
       { numRuns: 60 }
     );
   });
+
+  it("applyOps with `now` maintains valid timestamps and inverse restores exact serialized graph", () => {
+    const arbGraphAndOps = arbValidGraph(2, 8).chain((initial) =>
+      fc.integer({ min: 1, max: 4 }).chain((numOps) => {
+        const buildChain = (
+          cur: Graph,
+          step: number,
+          acc: Op[]
+        ): fc.Arbitrary<{ initial: Graph; ops: Op[] }> => {
+          if (step >= numOps) return fc.constant({ initial, ops: acc });
+          return arbValidOpForGraph(cur, step).chain((op) => {
+            const next = applyOps(cur, [op], {
+              now: `2026-11-26T0${step}:00:00.000Z`
+            }).graph;
+            return buildChain(next, step + 1, [...acc, op]);
+          });
+        };
+        return buildChain(initial, 0, []);
+      })
+    );
+
+    fc.assert(
+      fc.property(arbGraphAndOps, ({ initial, ops }) => {
+        const applied = applyOps(initial, ops, { now: "2026-11-26T10:00:00.000Z" });
+        expect(validateGraph(applied.graph).ok).toBe(true);
+
+        // Undo runs with preserveTimestamps (omitting `now`) so removed legacy nodes
+        // and original timestamps are restored byte-for-byte.
+        const undone = applyOps(applied.graph, applied.inverse);
+        expect(validateGraph(undone.graph).ok).toBe(true);
+        expect(serializeGraph(undone.graph)).toBe(serializeGraph(initial));
+      }),
+      { numRuns: 60 }
+    );
+  });
 });

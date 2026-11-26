@@ -1,6 +1,13 @@
-import { canonicalizeGraph } from "./canonicalize.js";
+import {
+  canonicalizeGraph,
+  canonicalizeNode,
+  normalizeIsoTimestamp,
+  serializeGraph
+} from "./canonicalize.js";
 import { edgeKey } from "./derive.js";
 import {
+  MUTABLE_NODE_FIELDS,
+  NODE_CONTENT_FIELDS,
   OpSchema,
   type Diagnostic,
   type Edge,
@@ -11,6 +18,11 @@ import {
   type Op
 } from "./schema.js";
 import { validateGraph, type ValidateOptions } from "./validate.js";
+
+export interface ApplyOptions extends ValidateOptions {
+  /** Optional ISO-8601 timestamp injected by mutation layer to auto-maintain node timestamps. */
+  now?: string;
+}
 
 export class ApplyError extends Error {
   public readonly diagnostics: Diagnostic[];
@@ -132,26 +144,14 @@ function moveSubtreeInArray(
   ];
 }
 
-const MUTABLE_FIELDS: MutableNodeField[] = [
-  "parentId",
-  "type",
-  "title",
-  "status",
-  "statusNote",
-  "description",
-  "conclusion",
-  "metrics",
-  "attachments",
-  "report"
-];
-
 export function applyOps(
   baseGraph: Graph,
   ops: Op[],
-  options?: ValidateOptions
+  options?: ApplyOptions
 ): ApplyResult {
   const graph = cloneGraph(baseGraph);
   const inverseSteps: Op[][] = [];
+  const effectiveNow = options?.now ? normalizeIsoTimestamp(options.now) : undefined;
 
   for (let opIndex = 0; opIndex < ops.length; opIndex++) {
     const rawOp = ops[opIndex];
@@ -224,6 +224,17 @@ export function applyOps(
       }
 
       const insertAt = findInsertionIndex(graph.nodes, newNode.parentId, op.after);
+      if (effectiveNow) {
+        if (newNode.createdAt === undefined) {
+          newNode.createdAt = effectiveNow;
+        }
+        if (newNode.updatedAt === undefined) {
+          newNode.updatedAt = newNode.createdAt;
+        }
+        if (newNode.status !== undefined && newNode.statusChangedAt === undefined) {
+          newNode.statusChangedAt = newNode.createdAt;
+        }
+      }
       graph.nodes.splice(insertAt, 0, newNode);
       inverseSteps.push([{ op: "remove_node", id: newNode.id, cascade: false }]);
       continue;
@@ -319,7 +330,7 @@ export function applyOps(
       }
 
       // Record inverse for all touched fields
-      for (const field of MUTABLE_FIELDS) {
+      for (const field of MUTABLE_NODE_FIELDS) {
         const isUnset = unsetFields.has(field) || (field === "parentId" && setObj.parentId === null);
         const isSet =
           !isUnset &&
@@ -341,6 +352,42 @@ export function applyOps(
           (node as Record<string, unknown>)[field] = structuredClone(
             (setObj as Record<string, unknown>)[field]
           );
+        }
+      }
+
+      if (effectiveNow) {
+        const canonBefore = canonicalizeNode(beforeSnapshot);
+        const canonAfter = canonicalizeNode(node);
+        const contentChanged = NODE_CONTENT_FIELDS.some(
+          (f) => JSON.stringify(canonBefore[f]) !== JSON.stringify(canonAfter[f])
+        );
+        const statusChanged = canonBefore.status !== canonAfter.status;
+
+        const explicitUpdatedAt =
+          unsetFields.has("updatedAt") ||
+          (Object.prototype.hasOwnProperty.call(setObj, "updatedAt") &&
+            setObj.updatedAt !== undefined);
+        const explicitStatusChangedAt =
+          unsetFields.has("statusChangedAt") ||
+          (Object.prototype.hasOwnProperty.call(setObj, "statusChangedAt") &&
+            setObj.statusChangedAt !== undefined);
+
+        if (contentChanged && !explicitUpdatedAt) {
+          if (canonBefore.updatedAt === undefined) {
+            invUnset.push("updatedAt");
+          } else {
+            invSet.updatedAt = canonBefore.updatedAt;
+          }
+          node.updatedAt = effectiveNow;
+        }
+
+        if (statusChanged && !explicitStatusChangedAt) {
+          if (canonBefore.statusChangedAt === undefined) {
+            invUnset.push("statusChangedAt");
+          } else {
+            invSet.statusChangedAt = canonBefore.statusChangedAt;
+          }
+          node.statusChangedAt = effectiveNow;
         }
       }
 
@@ -535,4 +582,66 @@ export function applyOps(
     inverse,
     warnings: validation.warnings
   };
+}
+
+/**
+ * Backfills or refreshes timestamps on nodes added or semantically modified by
+ * an external direct edit to `.tgraph.json`, without fabricating timestamps on
+ * untouched legacy nodes.
+ */
+export function reconcileExternalTimestamps(
+  baseGraph: Graph,
+  nextGraph: Graph,
+  now: string
+): { graph: Graph; changed: boolean } {
+  const effectiveNow = normalizeIsoTimestamp(now);
+  const baseMap = new Map(baseGraph.nodes.map((n) => [n.id, canonicalizeNode(n)]));
+  const next = cloneGraph(nextGraph);
+  let mutated = false;
+
+  for (const node of next.nodes) {
+    const canonBase = baseMap.get(node.id);
+    if (!canonBase) {
+      if (node.createdAt === undefined) {
+        node.createdAt = effectiveNow;
+        mutated = true;
+      }
+      if (node.updatedAt === undefined) {
+        node.updatedAt = node.createdAt;
+        mutated = true;
+      }
+      if (node.status !== undefined && node.statusChangedAt === undefined) {
+        node.statusChangedAt = node.createdAt;
+        mutated = true;
+      }
+      continue;
+    }
+
+    const canonNext = canonicalizeNode(node);
+    const contentChanged = NODE_CONTENT_FIELDS.some(
+      (f) => JSON.stringify(canonBase[f]) !== JSON.stringify(canonNext[f])
+    );
+    const statusChanged = canonBase.status !== canonNext.status;
+
+    if (
+      contentChanged &&
+      (canonNext.updatedAt === undefined || canonNext.updatedAt === canonBase.updatedAt)
+    ) {
+      node.updatedAt = effectiveNow;
+      mutated = true;
+    }
+
+    if (
+      statusChanged &&
+      (canonNext.statusChangedAt === undefined ||
+        canonNext.statusChangedAt === canonBase.statusChangedAt)
+    ) {
+      node.statusChangedAt = effectiveNow;
+      mutated = true;
+    }
+  }
+
+  const reconciled = canonicalizeGraph(next);
+  const changed = mutated && serializeGraph(reconciled) !== serializeGraph(nextGraph);
+  return { graph: reconciled, changed };
 }

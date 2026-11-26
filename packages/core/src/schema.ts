@@ -2,6 +2,31 @@ import { z } from "zod";
 
 export const NODE_ID_REGEX = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 export const GRAPH_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export const IsoTimestampSchema = z.iso.datetime({ offset: true });
+
+export const NODE_TIMESTAMP_FIELDS = [
+  "createdAt",
+  "updatedAt",
+  "statusChangedAt"
+] as const;
+
+export const NODE_CONTENT_FIELDS = [
+  "type",
+  "title",
+  "status",
+  "statusNote",
+  "description",
+  "conclusion",
+  "metrics",
+  "attachments",
+  "report"
+] as const;
+
+export const MUTABLE_NODE_FIELDS = [
+  "parentId",
+  ...NODE_CONTENT_FIELDS,
+  ...NODE_TIMESTAMP_FIELDS
+] as const;
 
 export const StatusSchema = z.enum([
   "todo",
@@ -62,7 +87,10 @@ export const NodeSchema = z
     conclusion: z.string().optional(),
     metrics: z.array(MetricSchema).optional(),
     attachments: z.array(AttachmentSchema).optional(),
-    report: z.boolean().optional()
+    report: z.boolean().optional(),
+    createdAt: IsoTimestampSchema.optional(),
+    updatedAt: IsoTimestampSchema.optional(),
+    statusChangedAt: IsoTimestampSchema.optional()
   })
   .strict();
 export type Node = z.infer<typeof NodeSchema>;
@@ -96,18 +124,7 @@ export const GraphSchema = z
   .strict();
 export type Graph = z.infer<typeof GraphSchema>;
 
-export const MutableNodeFieldSchema = z.enum([
-  "parentId",
-  "type",
-  "title",
-  "status",
-  "statusNote",
-  "description",
-  "conclusion",
-  "metrics",
-  "attachments",
-  "report"
-]);
+export const MutableNodeFieldSchema = z.enum(MUTABLE_NODE_FIELDS);
 export type MutableNodeField = z.infer<typeof MutableNodeFieldSchema>;
 
 export const NodePatchSetSchema = z
@@ -122,6 +139,9 @@ export const NodePatchSetSchema = z
     metrics: z.array(MetricSchema).optional(),
     attachments: z.array(AttachmentSchema).optional(),
     report: z.boolean().optional(),
+    createdAt: IsoTimestampSchema.optional(),
+    updatedAt: IsoTimestampSchema.optional(),
+    statusChangedAt: IsoTimestampSchema.optional(),
     after: z.string().regex(NODE_ID_REGEX).nullable().optional()
   })
   .strict();

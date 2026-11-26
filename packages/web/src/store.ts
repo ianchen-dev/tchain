@@ -512,7 +512,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         baseHash: graphHash,
         ops: entry.inverse,
         source: "manual",
-        title: `撤销：${entry.label}`
+        title: `撤销：${entry.label}`,
+        preserveTimestamps: true
       });
       set((state) => ({
         graph: res.graph,
@@ -551,7 +552,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         baseHash: graphHash,
         ops: entry.forward,
         source: "manual",
-        title: `重做：${entry.label}`
+        title: `重做：${entry.label}`,
+        preserveTimestamps: true
       });
       set((state) => ({
         graph: res.graph,

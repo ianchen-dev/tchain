@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { applyOps, ApplyError, type ApplyResult } from "./apply.js";
+import { applyOps, ApplyError, type ApplyOptions, type ApplyResult } from "./apply.js";
 import { hashGraph } from "./canonicalize.js";
 import { deriveGraph, edgeKey } from "./derive.js";
 import {
@@ -7,6 +7,7 @@ import {
   AddNodeOpSchema,
   DiagnosticSchema,
   GRAPH_ID_REGEX,
+  MUTABLE_NODE_FIELDS,
   RemoveEdgeOpSchema,
   RemoveNodeOpSchema,
   UpdateNodeOpSchema,
@@ -239,18 +240,7 @@ function applySingleOpLight(nodes: Node[], edges: Edge[], op: Op): { nodes: Node
     if (node) {
       const setObj = op.set ?? {};
       const unsetSet = new Set(op.unset ?? []);
-      for (const field of [
-        "parentId",
-        "type",
-        "title",
-        "status",
-        "statusNote",
-        "description",
-        "conclusion",
-        "metrics",
-        "attachments",
-        "report"
-      ] as const) {
+      for (const field of MUTABLE_NODE_FIELDS) {
         if (unsetSet.has(field) || (field === "parentId" && setObj.parentId === null)) {
           delete (node as Record<string, unknown>)[field];
         } else if (
@@ -735,7 +725,7 @@ export function applySelectedPatchOps(
   currentGraph: Graph,
   patch: Pick<PatchFile, "ops">,
   selectedIndices: ReadonlyArray<number>,
-  options?: ValidateOptions
+  options?: ApplyOptions
 ): ApplyResult {
   const uniqueSorted = [...new Set(selectedIndices)]
     .filter((idx) => idx >= 0 && idx < patch.ops.length)

@@ -1,25 +1,14 @@
 import { canonicalizeGraph } from "./canonicalize.js";
 import { edgeKey } from "./derive.js";
-import type {
-  Edge,
-  Graph,
-  MutableNodeField,
-  Node,
-  NodePatchSet,
-  Op
+import {
+  NODE_CONTENT_FIELDS,
+  type Edge,
+  type Graph,
+  type MutableNodeField,
+  type Node,
+  type NodePatchSet,
+  type Op
 } from "./schema.js";
-
-const CONTENT_FIELDS: Exclude<MutableNodeField, "parentId">[] = [
-  "type",
-  "title",
-  "status",
-  "statusNote",
-  "description",
-  "conclusion",
-  "metrics",
-  "attachments",
-  "report"
-];
 
 function deepEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
@@ -158,7 +147,7 @@ export function diffGraphs(rawA: Graph, rawB: Graph): Op[] {
     const set: NodePatchSet = {};
     const unset: MutableNodeField[] = [];
 
-    for (const field of CONTENT_FIELDS) {
+    for (const field of NODE_CONTENT_FIELDS) {
       const av = (aNode as Record<string, unknown>)[field];
       const bv = (bNode as Record<string, unknown>)[field];
       if (deepEqual(av, bv)) continue;

@@ -11,6 +11,7 @@ import {
   diffGraphs,
   exportGraphJsonSchema,
   hashGraph,
+  reconcileExternalTimestamps,
   serializeGraph,
   sha256Hex,
   validateGraph,
@@ -339,5 +340,230 @@ describe("applyOps & diffGraphs targeted scenarios", () => {
     expect(focus.isFallback).toBe(true);
     expect(focus.message).toBe("当前没有进行中的节点");
     expect(focus.nextIds).toEqual(["B"]);
+  });
+});
+
+describe("node-level timestamps (createdAt, updatedAt, statusChangedAt)", () => {
+  it("validates ISO timestamps, normalizes timezone offsets to UTC, and rejects invalid dates", () => {
+    const validGraph: Graph = {
+      schemaVersion: 1,
+      id: "ts-valid",
+      title: "Timestamp Validation",
+      nodes: [
+        {
+          id: "A",
+          type: "task",
+          title: "Offset timestamp",
+          status: "todo",
+          createdAt: "2026-11-26T18:00:00+08:00",
+          updatedAt: "2026-11-26T10:05:00.500Z",
+          statusChangedAt: "2026-11-26T18:00:00+08:00"
+        }
+      ],
+      edges: []
+    };
+    expect(validateGraph(validGraph).ok).toBe(true);
+    const canon = canonicalizeGraph(validGraph);
+    expect(canon.nodes[0]?.createdAt).toBe("2026-11-26T10:00:00.000Z");
+    expect(canon.nodes[0]?.updatedAt).toBe("2026-11-26T10:05:00.500Z");
+    expect(canon.nodes[0]?.statusChangedAt).toBe("2026-11-26T10:00:00.000Z");
+
+    const invalidGraph = {
+      ...validGraph,
+      nodes: [
+        {
+          id: "A",
+          type: "task",
+          title: "Bad timestamp",
+          status: "todo",
+          createdAt: "not-a-timestamp"
+        }
+      ]
+    };
+    const invalidRes = validateGraph(invalidGraph);
+    expect(invalidRes.ok).toBe(false);
+    expect(invalidRes.errors.some((e) => e.path.includes("createdAt"))).toBe(true);
+  });
+
+  it("auto-maintains timestamps on add_node and update_node, skips no-op/reorder/reparent, and restores exact state on undo", () => {
+    const t1 = "2026-11-26T08:00:00.000Z";
+    const t2 = "2026-11-26T09:00:00.000Z";
+    const t3 = "2026-11-26T10:00:00.000Z";
+    const t4 = "2026-11-26T11:00:00.000Z";
+
+    const base: Graph = {
+      schemaVersion: 1,
+      id: "ts-ops",
+      title: "Timestamp Ops",
+      nodes: [
+        { id: "G", type: "goal", title: "Goal" },
+        { id: "T1", parentId: "G", type: "task", title: "Legacy Task", status: "todo" }
+      ],
+      edges: []
+    };
+
+    // 1. add_node: leaf gets createdAt/updatedAt/statusChangedAt; container without status omits statusChangedAt
+    const added = applyOps(
+      base,
+      [
+        {
+          op: "add_node",
+          node: { id: "C1", parentId: "G", type: "option", title: "Container" }
+        },
+        {
+          op: "add_node",
+          node: { id: "T2", parentId: "C1", type: "task", title: "Task 2", status: "active" }
+        }
+      ],
+      { now: t1 }
+    );
+
+    const c1 = added.graph.nodes.find((n) => n.id === "C1")!;
+    expect(c1.createdAt).toBe(t1);
+    expect(c1.updatedAt).toBe(t1);
+    expect(c1.statusChangedAt).toBeUndefined();
+
+    const t2Node = added.graph.nodes.find((n) => n.id === "T2")!;
+    expect(t2Node.createdAt).toBe(t1);
+    expect(t2Node.updatedAt).toBe(t1);
+    expect(t2Node.statusChangedAt).toBe(t1);
+
+    // Legacy T1 untouched
+    const t1Node = added.graph.nodes.find((n) => n.id === "T1")!;
+    expect(t1Node.createdAt).toBeUndefined();
+    expect(t1Node.updatedAt).toBeUndefined();
+
+    // 2. Content-only update bumps updatedAt but NOT statusChangedAt
+    const contentUpdated = applyOps(
+      added.graph,
+      [{ op: "update_node", id: "T2", set: { conclusion: "Initial finding" } }],
+      { now: t2 }
+    );
+    const t2AfterContent = contentUpdated.graph.nodes.find((n) => n.id === "T2")!;
+    expect(t2AfterContent.createdAt).toBe(t1);
+    expect(t2AfterContent.updatedAt).toBe(t2);
+    expect(t2AfterContent.statusChangedAt).toBe(t1);
+
+    // 3. Status change bumps both updatedAt and statusChangedAt
+    const statusUpdated = applyOps(
+      contentUpdated.graph,
+      [{ op: "update_node", id: "T2", set: { status: "done" } }],
+      { now: t3 }
+    );
+    const t2AfterStatus = statusUpdated.graph.nodes.find((n) => n.id === "T2")!;
+    expect(t2AfterStatus.updatedAt).toBe(t3);
+    expect(t2AfterStatus.statusChangedAt).toBe(t3);
+
+    // 4. Undo even when passing a later `now` restores exact prior timestamps (t2, t1)
+    const undoneStatus = applyOps(statusUpdated.graph, statusUpdated.inverse, { now: t4 });
+    expect(serializeGraph(undoneStatus.graph)).toBe(serializeGraph(contentUpdated.graph));
+
+    // 5. Undo on legacy node clears newly stamped updatedAt/statusChangedAt
+    const legacyEdited = applyOps(
+      base,
+      [{ op: "update_node", id: "T1", set: { status: "active" } }],
+      { now: t2 }
+    );
+    expect(legacyEdited.graph.nodes.find((n) => n.id === "T1")?.updatedAt).toBe(t2);
+    expect(legacyEdited.graph.nodes.find((n) => n.id === "T1")?.statusChangedAt).toBe(t2);
+
+    const legacyUndone = applyOps(legacyEdited.graph, legacyEdited.inverse, { now: t4 });
+    expect(serializeGraph(legacyUndone.graph)).toBe(serializeGraph(base));
+
+    // 6. No-op update, sibling reorder (`after`), reparent (`parentId`), and container dissolve do NOT bump updatedAt
+    const reordered = applyOps(
+      contentUpdated.graph,
+      [
+        { op: "update_node", id: "T2", set: { conclusion: "Initial finding" } },
+        { op: "update_node", id: "T1", set: { after: null } },
+        { op: "update_node", id: "C1", set: { after: "T1" } }
+      ],
+      { now: t4 }
+    );
+    expect(reordered.graph.nodes.find((n) => n.id === "T2")?.updatedAt).toBe(t2);
+    expect(reordered.graph.nodes.find((n) => n.id === "T1")?.updatedAt).toBeUndefined();
+    expect(reordered.graph.nodes.find((n) => n.id === "C1")?.updatedAt).toBe(t1);
+
+    const dissolved = applyOps(
+      contentUpdated.graph,
+      [{ op: "remove_node", id: "C1", cascade: false }],
+      { now: t4 }
+    );
+    expect(dissolved.graph.nodes.find((n) => n.id === "T2")?.parentId).toBe("G");
+    expect(dissolved.graph.nodes.find((n) => n.id === "T2")?.updatedAt).toBe(t2);
+  });
+
+  it("derives subtreeUpdatedAt as the latest timestamp across descendants", () => {
+    const g: Graph = {
+      schemaVersion: 1,
+      id: "subtree-ts",
+      title: "Subtree Timestamps",
+      nodes: [
+        { id: "Root", type: "goal", title: "Root", createdAt: "2026-11-20T00:00:00.000Z" },
+        { id: "ChildA", parentId: "Root", type: "task", title: "A", status: "done", updatedAt: "2026-11-22T12:00:00.000Z" },
+        { id: "ChildB", parentId: "Root", type: "task", title: "B", status: "active", statusChangedAt: "2026-11-25T15:30:00.000Z" }
+      ],
+      edges: []
+    };
+    const derived = deriveGraph(g);
+    expect(derived.subtreeUpdatedAt.get("Root")).toBe("2026-11-25T15:30:00.000Z");
+    expect(derived.subtreeUpdatedAt.get("ChildA")).toBe("2026-11-22T12:00:00.000Z");
+    expect(derived.subtreeUpdatedAt.get("ChildB")).toBe("2026-11-25T15:30:00.000Z");
+  });
+
+  it("reconciles timestamps on external edits without fabricating timestamps for untouched nodes", () => {
+    const now = "2026-11-26T12:00:00.000Z";
+    const base: Graph = {
+      schemaVersion: 1,
+      id: "ext-ts",
+      title: "External",
+      nodes: [
+        { id: "A", type: "goal", title: "Untouched", status: "active" },
+        {
+          id: "B",
+          type: "task",
+          title: "Content Edited",
+          status: "todo",
+          createdAt: "2026-11-20T00:00:00.000Z",
+          updatedAt: "2026-11-20T00:00:00.000Z"
+        },
+        { id: "C", type: "task", title: "Explicit Ts", status: "todo" }
+      ],
+      edges: []
+    };
+
+    const next: Graph = {
+      ...base,
+      nodes: [
+        base.nodes[0]!,
+        { ...base.nodes[1]!, title: "Content Edited v2", status: "done" },
+        {
+          ...base.nodes[2]!,
+          title: "Explicit Ts v2",
+          updatedAt: "2026-11-25T08:00:00.000Z"
+        },
+        { id: "D", type: "task", title: "New External Node", status: "todo" }
+      ]
+    };
+
+    const res = reconcileExternalTimestamps(base, next, now);
+    expect(res.changed).toBe(true);
+
+    const a = res.graph.nodes.find((n) => n.id === "A")!;
+    expect(a.createdAt).toBeUndefined();
+    expect(a.updatedAt).toBeUndefined();
+
+    const b = res.graph.nodes.find((n) => n.id === "B")!;
+    expect(b.createdAt).toBe("2026-11-20T00:00:00.000Z");
+    expect(b.updatedAt).toBe(now);
+    expect(b.statusChangedAt).toBe(now);
+
+    const c = res.graph.nodes.find((n) => n.id === "C")!;
+    expect(c.updatedAt).toBe("2026-11-25T08:00:00.000Z");
+
+    const d = res.graph.nodes.find((n) => n.id === "D")!;
+    expect(d.createdAt).toBe(now);
+    expect(d.updatedAt).toBe(now);
+    expect(d.statusChangedAt).toBe(now);
   });
 });

@@ -7,6 +7,7 @@ import {
   diffGraphs,
   hashGraph,
   preparePatchOps,
+  reconcileExternalTimestamps,
   serializeGraph,
   summarizeOps,
   validateGraph,
@@ -679,8 +680,9 @@ export class WorkspaceStore {
 
   /**
    * Accepts an external direct file modification (PRD §7.6):
-   * saves pre-accept history snapshot of baseline and updates baseline in memory
-   * WITHOUT rewriting the user's file on disk.
+   * saves pre-accept history snapshot of baseline, backfills/refreshes
+   * timestamps on added or semantically modified nodes and writes back to disk
+   * when timestamps changed, and updates baseline in memory.
    */
   async acceptExternalChange(graphId: string): Promise<{
     graph: Graph;
@@ -706,16 +708,29 @@ export class WorkspaceStore {
         }
       );
 
+      const now = new Date().toISOString();
+      const reconciled = reconcileExternalTimestamps(
+        entry.lastValidGraph,
+        pending.nextGraph,
+        now
+      );
+      const finalGraph = reconciled.changed ? reconciled.graph : pending.nextGraph;
+      const finalHash = reconciled.changed ? hashGraph(finalGraph) : pending.nextHash;
+
+      if (reconciled.changed) {
+        this.registerOwnWriteHash(graphId, finalHash);
+        await atomicWriteText(entry.filePath, serializeGraph(finalGraph));
+      }
+
       this.entries.set(graphId, {
         ...entry,
-        lastValidGraph: pending.nextGraph,
-        lastValidHash: pending.nextHash,
+        lastValidGraph: finalGraph,
+        lastValidHash: finalHash,
         lastValidWarnings: pending.warnings,
         lastError: null
       });
       this.pendingExternalChanges.delete(graphId);
 
-      const now = new Date().toISOString();
       this.emit({
         type: "external:resolved",
         payload: { graphId, resolution: "accepted", at: now }
@@ -724,15 +739,15 @@ export class WorkspaceStore {
         type: "graph:updated",
         payload: {
           graphId,
-          hash: pending.nextHash,
+          hash: finalHash,
           warningCount: pending.warnings.length,
           at: now
         }
       });
 
       return {
-        graph: pending.nextGraph,
-        hash: pending.nextHash,
+        graph: finalGraph,
+        hash: finalHash,
         warnings: pending.warnings,
         savedRev
       };

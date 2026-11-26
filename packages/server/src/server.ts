@@ -77,7 +77,8 @@ const PostOpsBodySchema = z.object({
   ops: z.array(OpSchema).min(1),
   source: HistorySourceSchema.optional(),
   title: z.string().optional(),
-  snapshotBefore: z.boolean().optional()
+  snapshotBefore: z.boolean().optional(),
+  preserveTimestamps: z.boolean().optional()
 });
 
 const ProposePatchBodySchema = z.object({
@@ -354,6 +355,7 @@ export function createWorkbenchApp(params: {
         source: parsed.data.source ?? "manual",
         title: parsed.data.title,
         snapshotBefore: parsed.data.snapshotBefore,
+        preserveTimestamps: parsed.data.preserveTimestamps,
         onBeforeWriteHash: (nextHash) => store.registerOwnWriteHash(graphId, nextHash)
       });
 

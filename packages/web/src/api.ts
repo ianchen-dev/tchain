@@ -192,6 +192,7 @@ export async function postGraphOps(
     source?: HistorySource;
     title?: string;
     snapshotBefore?: boolean;
+    preserveTimestamps?: boolean;
   }
 ): Promise<PostOpsResponse> {
   const res = await fetch(`/api/graphs/${encodeURIComponent(graphId)}/ops`, {

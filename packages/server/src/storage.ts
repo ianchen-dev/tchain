@@ -290,6 +290,8 @@ export interface MutateGraphParams {
   source?: HistorySource;
   title?: string;
   snapshotBefore?: boolean;
+  preserveTimestamps?: boolean;
+  now?: string;
   onBeforeWriteHash?: (nextHash: string) => void;
 }
 
@@ -313,7 +315,10 @@ export async function mutateGraph(params: MutateGraphParams): Promise<MutateGrap
       throw new StaleBaseError(baseHash, loaded.hash);
     }
 
-    const applied = applyOps(loaded.graph, ops, { fileExists });
+    const applied = applyOps(loaded.graph, ops, {
+      fileExists,
+      ...(params.preserveTimestamps ? {} : { now: params.now ?? new Date().toISOString() })
+    });
     const nextText = serializeGraph(applied.graph);
     const nextHash = hashGraph(applied.graph);
 
@@ -705,7 +710,8 @@ export async function applyPatchById(params: {
     }
 
     const applied = applySelectedPatchOps(loaded.graph, rec.patch, selectedIndices, {
-      fileExists
+      fileExists,
+      now: new Date().toISOString()
     });
     const selectedSet = new Set(selectedIndices);
     const skippedIndices = rec.patch.ops

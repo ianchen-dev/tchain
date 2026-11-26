@@ -1090,6 +1090,40 @@ body,
   gap: 8px;
 }
 
+.tc-insp-timestamps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.tc-insp-time-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.tc-insp-time-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.tc-insp-time-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .tc-insp-inherit-banner {
   display: flex;
   align-items: flex-start;

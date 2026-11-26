@@ -1,6 +1,15 @@
 import type { Attachment, Edge, Graph, Metric, Node } from "./schema.js";
 import { sha256Hex } from "./sha256.js";
 
+export function normalizeIsoTimestamp(raw: string): string {
+  const trimmed = raw.trim();
+  const ms = Date.parse(trimmed);
+  if (Number.isFinite(ms)) {
+    return new Date(ms).toISOString();
+  }
+  return trimmed;
+}
+
 export function normalizeAttachmentPath(rawPath: string): string {
   let normalized = rawPath.replace(/\\/g, "/");
   try {
@@ -52,9 +61,9 @@ function canonicalizeAttachments(
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
-function canonicalizeNode(node: Node): Node {
+export function canonicalizeNode(node: Node): Node {
   // Preserve exact canonical key order:
-  // id, parentId, type, title, status, statusNote, description, conclusion, metrics, attachments, report
+  // id, parentId, type, title, status, statusNote, description, conclusion, metrics, attachments, report, createdAt, updatedAt, statusChangedAt
   const ordered: Record<string, unknown> = {
     id: node.id
   };
@@ -85,6 +94,15 @@ function canonicalizeNode(node: Node): Node {
   }
   if (node.report !== undefined) {
     ordered.report = node.report;
+  }
+  if (node.createdAt !== undefined && node.createdAt.trim() !== "") {
+    ordered.createdAt = normalizeIsoTimestamp(node.createdAt);
+  }
+  if (node.updatedAt !== undefined && node.updatedAt.trim() !== "") {
+    ordered.updatedAt = normalizeIsoTimestamp(node.updatedAt);
+  }
+  if (node.statusChangedAt !== undefined && node.statusChangedAt.trim() !== "") {
+    ordered.statusChangedAt = normalizeIsoTimestamp(node.statusChangedAt);
   }
 
   return ordered as unknown as Node;

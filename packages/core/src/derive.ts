@@ -1,3 +1,4 @@
+import { normalizeIsoTimestamp } from "./canonicalize.js";
 import type { Edge, Graph, Node, Status } from "./schema.js";
 
 export function edgeKey(source: string, target: string): string {
@@ -23,6 +24,7 @@ export interface DerivedGraph {
   resolvedStatus: Map<string, Status>;
   effectiveStatus: Map<string, Status>;
   inheritedStatusFrom: Map<string, string>;
+  subtreeUpdatedAt: Map<string, string>;
 }
 
 function rollupStatuses(childStatuses: Status[]): Status {
@@ -164,6 +166,57 @@ export function deriveGraph(graph: Graph): DerivedGraph {
     }
   }
 
+  const subtreeUpdatedAt = new Map<string, string>();
+  const subtreeVisiting = new Set<string>();
+
+  const pickLatestTimestamp = (
+    current: { iso: string; ms: number } | null,
+    candidateRaw: string | undefined
+  ): { iso: string; ms: number } | null => {
+    if (!candidateRaw || candidateRaw.trim() === "") return current;
+    const iso = normalizeIsoTimestamp(candidateRaw);
+    const ms = Date.parse(iso);
+    if (!Number.isFinite(ms)) return current;
+    if (!current || ms > current.ms) {
+      return { iso, ms };
+    }
+    return current;
+  };
+
+  const computeSubtreeUpdatedAt = (id: string): { iso: string; ms: number } | null => {
+    const cached = subtreeUpdatedAt.get(id);
+    if (cached !== undefined) {
+      return { iso: cached, ms: Date.parse(cached) };
+    }
+    if (subtreeVisiting.has(id)) return null;
+    subtreeVisiting.add(id);
+
+    const node = nodeMap.get(id);
+    let best: { iso: string; ms: number } | null = null;
+    if (node) {
+      best = pickLatestTimestamp(best, node.updatedAt);
+      best = pickLatestTimestamp(best, node.statusChangedAt);
+      best = pickLatestTimestamp(best, node.createdAt);
+    }
+
+    for (const cid of childrenMap.get(id) ?? []) {
+      const childBest = computeSubtreeUpdatedAt(cid);
+      if (childBest && (!best || childBest.ms > best.ms)) {
+        best = childBest;
+      }
+    }
+
+    subtreeVisiting.delete(id);
+    if (best) {
+      subtreeUpdatedAt.set(id, best.iso);
+    }
+    return best;
+  };
+
+  for (const node of graph.nodes) {
+    computeSubtreeUpdatedAt(node.id);
+  }
+
   return {
     nodeMap,
     nodeIndex,
@@ -178,6 +231,7 @@ export function deriveGraph(graph: Graph): DerivedGraph {
     rolledUpStatus,
     resolvedStatus,
     effectiveStatus,
-    inheritedStatusFrom
+    inheritedStatusFrom,
+    subtreeUpdatedAt
   };
 }

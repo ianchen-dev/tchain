@@ -44,6 +44,9 @@ const FIELD_LABELS: Record<string, string> = {
   metrics: "量化指标",
   attachments: "关联文档",
   report: "汇报可见",
+  createdAt: "创建时间",
+  updatedAt: "更新时间",
+  statusChangedAt: "状态变更时间",
   after: "排序位置"
 };
 
@@ -215,7 +218,7 @@ export function PatchReviewDrawer() {
                 文件：<code>{pendingExternalChange.file}</code>
               </div>
               <div className="tc-review-rationale">
-                画布正在预览磁盘新版本的高亮变更。您可以点击「接受外部变更」更新工作台基线（不重写磁盘文件，并自动留存旧版本快照），或点击「一键还原」将磁盘恢复为受控基线。
+                画布正在预览磁盘新版本的高亮变更。您可以点击「接受外部变更」更新工作台基线（自动补齐/刷新变更节点的时间戳并回写文件，同时留存旧版本快照），或点击「一键还原」将磁盘恢复为受控基线。
               </div>
             </div>
 

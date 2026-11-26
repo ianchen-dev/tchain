@@ -125,6 +125,11 @@ describe("Phase 2: Unified ops pipeline, CAS 409, Patch conflict rebase, Rollbac
     const hashAfterEdit1 = String(edit1.json.hash);
     expect(hashAfterEdit1).not.toBe(baseHash);
     expect(edit1.json.savedRev).toBeTruthy();
+    const k2AfterEdit1 = (
+      edit1.json.graph as { nodes: Array<{ id: string; updatedAt?: string; statusChangedAt?: string }> }
+    ).nodes.find((n) => n.id === "K2");
+    expect(k2AfterEdit1?.updatedAt).toBeTruthy();
+    expect(k2AfterEdit1?.statusChangedAt).toBeTruthy();
 
     // 2. Stale baseHash -> 409 STALE_BASE
     const stale = await apiRequest({
@@ -141,7 +146,7 @@ describe("Phase 2: Unified ops pipeline, CAS 409, Patch conflict rebase, Rollbac
     expect(stale.json.code).toBe("STALE_BASE");
     expect(stale.json.currentHash).toBe(hashAfterEdit1);
 
-    // 3. Undo via returned inverse ops -> returns exact original baseHash
+    // 3. Undo via returned inverse ops with preserveTimestamps -> returns exact original baseHash
     const undo = await apiRequest({
       port: srv.port,
       token: srv.token,
@@ -149,11 +154,17 @@ describe("Phase 2: Unified ops pipeline, CAS 409, Patch conflict rebase, Rollbac
       path: "/api/graphs/announcement-pipeline/ops",
       body: {
         baseHash: hashAfterEdit1,
-        ops: edit1.json.inverse
+        ops: edit1.json.inverse,
+        preserveTimestamps: true
       }
     });
     expect(undo.status).toBe(200);
     expect(undo.json.hash).toBe(baseHash);
+    const k2AfterUndo = (
+      undo.json.graph as { nodes: Array<{ id: string; updatedAt?: string; statusChangedAt?: string }> }
+    ).nodes.find((n) => n.id === "K2");
+    expect(k2AfterUndo?.updatedAt).toBeUndefined();
+    expect(k2AfterUndo?.statusChangedAt).toBeUndefined();
 
     // 4. Re-apply edit1, then rollback to rev 1, then verify rollback itself is reversible!
     const edit2 = await apiRequest({
@@ -291,10 +302,23 @@ describe("Phase 2: Unified ops pipeline, CAS 409, Patch conflict rebase, Rollbac
     expect(applied.json.skippedIndices).toEqual([0]);
     expect((applied.json.patch as { state: string }).state).toBe("partially_applied");
 
-    const updatedNodes = (applied.json.graph as { nodes: Array<{ id: string; status?: string }> })
-      .nodes;
+    const updatedNodes = (
+      applied.json.graph as {
+        nodes: Array<{
+          id: string;
+          status?: string;
+          createdAt?: string;
+          updatedAt?: string;
+          statusChangedAt?: string;
+        }>;
+      }
+    ).nodes;
     expect(updatedNodes.find((n) => n.id === "K3")?.status).toBe("active");
-    expect(updatedNodes.find((n) => n.id === "K7")).toBeDefined();
+    const k7Node = updatedNodes.find((n) => n.id === "K7");
+    expect(k7Node).toBeDefined();
+    expect(k7Node?.createdAt).toBeTruthy();
+    expect(k7Node?.updatedAt).toBe(k7Node?.createdAt);
+    expect(k7Node?.statusChangedAt).toBe(k7Node?.createdAt);
   });
 
   it("reverts unauthorized direct external file edits back to baseline", async () => {
@@ -351,6 +375,104 @@ describe("Phase 2: Unified ops pipeline, CAS 409, Patch conflict rebase, Rollbac
 
     const diskAfterRevert = JSON.parse(fs.readFileSync(graphFile, "utf8"));
     expect(diskAfterRevert.nodes.find((n: { id: string }) => n.id === "K3").status).toBe("todo");
+  });
+
+  it("backfills timestamps and writes back to disk on accepting external edits without re-triggering review", async () => {
+    const dir = makeTempWorkspace();
+    const srv = await startWorkbenchServer({
+      workspaceRoot: dir,
+      port: 14845,
+      token: "p2-ext-accept-token",
+      watch: true
+    });
+    runningServers.push(srv);
+
+    const graphFile = path.join(
+      dir,
+      ".thoughtchain",
+      "graphs",
+      "announcement-pipeline.tgraph.json"
+    );
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Simulate external edit: modify K3 status and add K7 without timestamps
+    const raw = JSON.parse(fs.readFileSync(graphFile, "utf8"));
+    const k3 = raw.nodes.find((n: { id: string }) => n.id === "K3");
+    k3.status = "done";
+    k3.conclusion = "外部完成调研";
+    raw.nodes.push({
+      id: "K7",
+      parentId: "K",
+      type: "task",
+      title: "外部新增节点",
+      status: "todo"
+    });
+    fs.writeFileSync(graphFile, JSON.stringify(raw, null, 2), "utf8");
+
+    const deadline = Date.now() + 2500;
+    let detected = false;
+    while (Date.now() < deadline) {
+      const res = await apiRequest({
+        port: srv.port,
+        token: srv.token,
+        path: "/api/graphs/announcement-pipeline/external"
+      });
+      if (res.json.pendingExternalChange) {
+        detected = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    expect(detected).toBe(true);
+
+    const acceptRes = await apiRequest({
+      port: srv.port,
+      token: srv.token,
+      method: "POST",
+      path: "/api/graphs/announcement-pipeline/external/accept"
+    });
+    expect(acceptRes.status).toBe(200);
+
+    const acceptedNodes = (
+      acceptRes.json.graph as {
+        nodes: Array<{
+          id: string;
+          createdAt?: string;
+          updatedAt?: string;
+          statusChangedAt?: string;
+        }>;
+      }
+    ).nodes;
+    const acceptedK3 = acceptedNodes.find((n) => n.id === "K3")!;
+    expect(acceptedK3.createdAt).toBeUndefined();
+    expect(acceptedK3.updatedAt).toBeTruthy();
+    expect(acceptedK3.statusChangedAt).toBeTruthy();
+
+    const acceptedK7 = acceptedNodes.find((n) => n.id === "K7")!;
+    expect(acceptedK7.createdAt).toBeTruthy();
+    expect(acceptedK7.updatedAt).toBe(acceptedK7.createdAt);
+    expect(acceptedK7.statusChangedAt).toBe(acceptedK7.createdAt);
+
+    // Untouched legacy node remains without timestamps
+    const acceptedK1 = acceptedNodes.find((n) => n.id === "K1")!;
+    expect(acceptedK1.createdAt).toBeUndefined();
+    expect(acceptedK1.updatedAt).toBeUndefined();
+
+    // Disk file also has backfilled timestamps
+    const diskGraph = JSON.parse(fs.readFileSync(graphFile, "utf8")) as {
+      nodes: Array<{ id: string; createdAt?: string; updatedAt?: string; statusChangedAt?: string }>;
+    };
+    expect(diskGraph.nodes.find((n) => n.id === "K3")?.updatedAt).toBe(acceptedK3.updatedAt);
+    expect(diskGraph.nodes.find((n) => n.id === "K7")?.createdAt).toBe(acceptedK7.createdAt);
+
+    // Chokidar watcher should NOT re-trigger pendingExternalChange from our own write-back
+    await new Promise((r) => setTimeout(r, 250));
+    const afterWait = await apiRequest({
+      port: srv.port,
+      token: srv.token,
+      path: "/api/graphs/announcement-pipeline/external"
+    });
+    expect(afterWait.json.pendingExternalChange).toBeNull();
   });
 
   it("supports CLI patch propose/list/show/apply/reject and history/rollback", () => {

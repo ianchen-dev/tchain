@@ -186,7 +186,7 @@ export function createThoughtChainMcpServer(workspaceDir?: string): McpServer {
   // 5. propose_graph_patch (ONLY mutation tool — never edits .tgraph.json directly!)
   server.tool(
     "propose_graph_patch",
-    "提交思维链图谱变更提案（Patch）。修改图谱请调用 propose_graph_patch，不要直接编辑 .tgraph.json。服务端会立即执行完整语义校验，合法时写入 .thoughtchain/patches/ 待用户在工作台审查后落盘；不合法时返回带 code/path/hint 的结构化错误供自行修正。",
+    "提交思维链图谱变更提案（Patch）。修改图谱请调用 propose_graph_patch，不要直接编辑 .tgraph.json。服务端会立即执行完整语义校验，合法时写入 .thoughtchain/patches/ 待用户在工作台审查后落盘；不合法时返回带 code/path/hint 的结构化错误供自行修正。节点时间戳（createdAt / updatedAt / statusChangedAt）由系统在应用时自动维护，无需在 ops 中填写。",
     {
       graphId: z.string().min(1).describe("目标图谱 ID"),
       title: z.string().min(1).describe("本次变更提案的简短标题"),

@@ -1,7 +1,7 @@
 # 思维链决策工作台（ThoughtChain Workbench）产品需求文档（PRD）
 
-> **文档状态**：v1.2（已合入技术审阅：统一变更管线、修订数据模型、投影规格、并发与安全、路线图重排）  
-> **更新日期**：2026-11-25  
+> **文档状态**：v1.3（新增节点级时间戳：Schema、管线自动维护与 Undo/Redo 精确还原、外部变更自动补齐回写、Inspector 时间展示）  
+> **更新日期**：2026-11-26  
 > **参考样板**：`新需求-思维链图.md`（业务仓库 `finance-news-flash/docs/feature/个股公告分析管道/全市场公告采集解析与多空分析/新需求-思维链图.md`）  
 > **0 号样板图**：[fixtures/announcement-pipeline.tgraph.json](../fixtures/announcement-pipeline.tgraph.json)  
 > **目标平台**：PC 桌面端浏览器（个人本机使用 + 现场投屏汇报）+ CLI / MCP 协议
@@ -12,6 +12,7 @@
 | :--- | :--- |
 | v1.1 | 范围收敛：纯自动排版、单源三视图、不内置 LLM、三道信任防线 |
 | v1.2 | 新增 `parked` 状态与容器状态汇总；`summary` 拆为 `description` / `conclusion`；删除 `order`、`rejected_branch`、边 `id`；新增唯一位置原则与环约束；所有写入统一为 ops 管线，Patch 增加 `baseHash` / `before` / `deps`；外部直接改文件纳入审查；规定 `project()` 投影流水线并修正焦点算法；补充锁 + CAS、本地服务安全；推送改为 SSE；路线图新增 Phase 0，Phase 1 只读 |
+| v1.3 | 新增节点级可选时间戳 `createdAt` / `updatedAt` / `statusChangedAt`（边暂不加）；由 `applyOps` 统一自动维护并在 Undo/Redo 中精确还原；容器动态派生 `subtreeUpdatedAt`；接受外部文件变更时自动补齐/刷新变更节点时间戳并回写磁盘；Inspector 抽屉新增时间记录展示 |
 
 ---
 
@@ -170,6 +171,9 @@ flowchart LR
 | `metrics[]` | `{ label, value, tone? }[]` | 结构化量化指标，`tone ∈ neutral / positive / warning` |
 | `attachments[]` | `{ path? , url? , title?, note? }[]` | 证据挂载。`path` 与 `url` 必须且只能填一个；`path` 是**相对工作区根目录的 POSIX 路径**（`/` 分隔，存储解码后的原文，不存 `%20`）；附件类型由扩展名或 URL 推导 |
 | `report` | boolean? | 覆盖汇报态的默认可见规则 |
+| `createdAt` | string? | 节点创建时间（ISO 8601 UTC，由变更管线在 `add_node` 时自动写入，之后不变） |
+| `updatedAt` | string? | 节点最近更新时间（ISO 8601 UTC，节点语义内容或状态发生实质变更时自动刷新） |
+| `statusChangedAt` | string? | 节点最近状态变更时间（ISO 8601 UTC，显式 `status` 发生变更或创建节点自带 `status` 时自动写入，为后续周报按完成/阻塞/搁置时间归类提供依据） |
 
 ### 5.6 Schema 定义（Zod 为唯一真源）
 
@@ -200,22 +204,25 @@ type Node = {
   metrics?: { label: string; value: string; tone?: "neutral" | "positive" | "warning" }[];
   attachments?: { path?: string; url?: string; title?: string; note?: string }[];
   report?: boolean;
+  createdAt?: string;                    // ISO 8601 UTC；可选，向后兼容历史图谱，由系统自动维护
+  updatedAt?: string;                    // ISO 8601 UTC；内容或状态实质变化时刷新
+  statusChangedAt?: string;              // ISO 8601 UTC；显式 status 变化时刷新
 };
 
 type Edge = {
   source: string;
   target: string;
-  kind?: "flow" | "depends_on" | "revises";   // 省略即 flow；边 ID 由 `${source}->${target}` 推导
+  kind?: "flow" | "depends_on" | "revises";   // 省略即 flow；边 ID 由 `${source}->${target}` 推导（边暂不记录时间戳）
 };
 ```
 
-> 时间戳、作者等元数据不写入图谱文件（避免每次写入都改动同一行，导致 Git 冲突），由 `history/index.json` 记录。
+> 图谱顶层不写入全局 `updatedAt` 或作者字段（避免每次写入都改动文件头同一行导致 Git 冲突，图谱级记录仍由 `history/index.json` 留存）；节点级时间戳仅随被改动节点局部更新，由变更管线自动维护且对历史无时间戳节点向后兼容。
 
 ### 5.7 校验规则（validate）
 
 **错误（error，拒绝写入）：**
 
-- Schema 与枚举不合法；id 格式不合法；节点 id 重复；
+- Schema 与枚举不合法（含节点时间戳非合法带时区 ISO-8601 日期时间字符串）；id 格式不合法；节点 id 重复；
 - `parentId` 指向不存在的节点，或形成环；
 - 叶子节点缺少 `status`；
 - 边端点不存在、自环、重复边、祖先-后代边；
@@ -248,9 +255,9 @@ type Edge = {
 
 - 两空格缩进，UTF-8，LF 换行，文件末尾保留换行；
 - 顶层字段顺序固定：`$schema, schemaVersion, id, title, layout, nodes, edges`；
-- 节点字段顺序固定：`id, parentId, type, title, status, statusNote, description, conclusion, metrics, attachments, report`；边字段顺序固定：`source, target, kind`；
+- 节点字段顺序固定：`id, parentId, type, title, status, statusNote, description, conclusion, metrics, attachments, report, createdAt, updatedAt, statusChangedAt`；边字段顺序固定：`source, target, kind`；
 - `nodes` 保持模型顺序（即同级顺序）；`edges` 按 `nodes` 中 source 的位置、再按 target 的位置排序；
-- 省略空数组、空字符串和默认值（如 `kind: "flow"`）；
+- 省略空数组、空字符串和默认值（如 `kind: "flow"`）；时间戳统一归一化为 UTC ISO 字符串（`.toISOString()`）；
 - 附件路径统一为 `/` 分隔。
 
 ### 5.9 0 号样板映射
@@ -372,6 +379,7 @@ Graph
 ### 6.5 右侧 Inspector 抽屉
 
 - **详情区**：标题、类型、状态（含有效状态提示，如“继承自 D：已搁置”）、`statusNote`、`description`、`conclusion`、上下游连线列表。Phase 2 起这一区域可编辑。
+- **时间记录区**：在标题与操作区下方以轻量胶囊展示节点的 `创建`、`更新`、`状态变更`（相对时间，悬浮显示完整本地时间 `YYYY-MM-DD HH:mm:ss`）；容器节点在子孙存在更新的时间戳且不同于自身 `updatedAt` 时，额外显示动态派生的 `子树更新`。历史未带时间戳的节点在工作态/焦点态提示“暂无时间记录（编辑后自动记录）”，在汇报态不显示占位提示以保持投屏整洁。
 - **指标区**：`metrics` 卡片，与画布卡片同步显示。
 - **证据区**：
   - 列出 `attachments`，点击本地 Markdown 即在抽屉扩展面板中渲染预览，支持表格、列表、代码高亮，Mermaid 懒加载后静态渲染；
@@ -436,6 +444,10 @@ flowchart LR
 | `remove_edge` | `{ source, target }` | — |
 
 - 同一批操作**按顺序执行**，后面的操作可以引用前面新增的节点；
+- **节点时间戳自动维护与精确还原**：
+  - 正常写入（人工编辑、Patch 应用）向 `applyOps` 注入当前 UTC 时间 `now`：`add_node` 自动写入 `createdAt`、`updatedAt`（若带 `status` 同时写入 `statusChangedAt`）；`update_node` 仅在语义内容字段（`type`、`title`、`status`、`statusNote`、`description`、`conclusion`、`metrics`、`attachments`、`report`）实际变化时刷新 `updatedAt`，在 `status` 变化时刷新 `statusChangedAt`。
+  - 纯同级重排（`after`）、移动父容器（`parentId`）、无实际字段变化更新，以及容器拆散（`remove_node { cascade: false }`）引起子节点上移，均不刷新节点时间戳。
+  - `update_node` 生成的 `inverse` ops 会完整记录旧时间戳（含原本无时间戳时的 `unset`），前端撤销/重做通过 `preserveTimestamps: true` 跳过 `now` 注入，确保精确还原旧时间戳或空白状态；`diff` 与 Patch 冲突检测（`before`）仅比对语义字段，不把时间戳当作变更噪点。
 - “废弃时缺少 `statusNote`”“附件不存在”这类检查属于校验器的 lint 警告，不需要单独的操作类型。
 
 ### 7.3 Patch 文件格式
@@ -516,7 +528,7 @@ flowchart LR
 #### 写入提案工具（Patch-Only Mutation）
 
 5. `propose_graph_patch(graphId, title, rationale, ops[])`：
-   - 操作集合见 §7.2；
+   - 操作集合见 §7.2；节点时间戳（`createdAt` / `updatedAt` / `statusChangedAt`）由系统在用户审查应用时自动维护，Agent 无需在提案 `ops` 中手填；
    - 服务端立即执行完整校验（§5.7）。不合法时返回结构化错误，Agent 可以据此自行修正；合法时写入 `patches/`，并返回 `patchId` 与警告列表；
    - **不提供任何直接写图的 MCP 工具**。
 
@@ -535,7 +547,7 @@ flowchart LR
 **外部直接改文件同样进入审查**：服务端保存最后一次已知的规范化内容与哈希。监听到外部修改（Agent 直接编辑、`git pull` / `checkout`、IDE 保存）后：
 
 - 内容不合法：画布顶部显示红色横幅并列出具体错误，**画布保持上一份合法版本**，不覆盖用户文件；
-- 内容合法：计算 `diff(last, new)` 得到 ops，以「外部变更」的形式进入与 Patch 相同的审查界面。用户可以接受（只更新基线，不重写文件），也可以一键还原。
+- 内容合法：计算 `diff(last, new)` 得到 ops，以「外部变更」的形式进入与 Patch 相同的审查界面。用户点击「接受外部变更」时，先留存旧版快照，再对外部新增或发生语义/状态变更的节点自动补齐/刷新 `createdAt`、`updatedAt`、`statusChangedAt`（不触碰未修改的历史节点，并保留用户显式填写的时间戳），必要时回写磁盘文件并更新基线（自身回写不二次触发外部变更审查）；也可以一键还原。
 - **Phase 1 例外**：Phase 1 还没有审查界面，外部合法修改直接热刷新；不合法时显示红色横幅。
 
 #### 防线二：撤销 + 历史版本（事后兜底）
