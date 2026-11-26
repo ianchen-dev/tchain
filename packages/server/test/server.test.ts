@@ -164,6 +164,7 @@ describe("tchain serve security, file boundaries, SSE hot-reload & tchain list",
     expect(setCookieHeader).toContain(`tchain_token=${srv.token}`);
     expect(setCookieHeader).toContain("HttpOnly");
     expect(setCookieHeader).toContain("SameSite=Strict");
+    expect(setCookieHeader).toContain("Max-Age=15552000");
 
     // 7. Cookie authenticates /api/graphs and /api/graphs/:id
     const cookieVal = `tchain_token=${srv.token}`;

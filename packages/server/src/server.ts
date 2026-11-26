@@ -819,6 +819,7 @@ export function createWorkbenchApp(params: {
       setCookie(c, TOKEN_COOKIE_NAME, token, {
         httpOnly: true,
         sameSite: "Strict",
+        maxAge: 180 * 24 * 60 * 60,
         path: "/"
       });
       return c.redirect("/", 302);
