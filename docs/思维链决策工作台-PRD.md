@@ -483,14 +483,18 @@ flowchart LR
 | `tchain validate [graph]` | 校验图谱，输出结构化错误与警告；失败时退出码非 0 | P0 |
 | `tchain context <graph> [--node <id>] [--format md\|json] [--max-tokens N]` | 上下文编译器 | P0 |
 | `tchain fmt [graph]` | 按规范化规则重写图谱文件 | P0 |
-| `tchain serve [dir] [--port 4377]` | 启动本地 Web 工作台 + 文件监听 + SSE；端口被占用时自动递增 | P1 |
+| `tchain serve [dir] [--port 4377]` | 幂等启动/复用该工作区 Web 工作台 + 文件监听 + SSE + HTTP MCP；新服务端口被占用时自动递增 | P1/P2 |
 | `tchain list` | 列出所有图谱与状态摘要（进行中/待办/阻塞/搁置节点数） | P1 |
-| `tchain mcp [dir]` | 以 stdio 模式启动 MCP Server | P2 |
+| `tchain mcp [dir]` | 兼容模式：启动客户端私有的 stdio MCP 子进程；日常共享使用 `serve` 的 `/mcp` URL | P2 |
 | `tchain patch propose <graph> --file <patch.json>` | 校验并提交变更提案 | P2 |
 | `tchain patch list` / `show <id>` / `apply <id> [--only 0,2]` / `reject <id>` | 查看、（部分）采纳或驳回 Patch | P2 |
 | `tchain history <graph>` / `tchain rollback <graph> <rev>` | 查看历史版本 / 回退 | P2 |
 
 ### 7.5 MCP Server 工具清单
+
+共享部署使用 `tchain serve` 同进程提供的 `/mcp`（Streamable HTTP，无状态 JSON 响应）。每个服务固定绑定一个工作区；多个 Codex/Cursor 客户端配置同一 URL，各请求隔离协议状态，共享文件存储及现有写锁/CAS/Patch 审查管线。HTTP MCP 复用 Web 服务的 token、Host/Origin 与跨站请求校验。无独立 SSE 流或会话，GET/DELETE 返回 405。
+
+`serve` 以真实工作区路径识别实例，启动锁串行化并发启动；复用前验证存活 PID、鉴权健康接口、工作区、随机实例 ID 与 MCP URL。PID 已不存在时恢复，PID 存活但校验失败时拒绝重复启动。token 持久保存在 `.thoughtchain/.server-token`，实例信息保存在 `server.json`；两者及启动锁均忽略版本控制。stdio 保留为兼容入口，不对其应用“工作区单进程”锁，因为独立 stdio 客户端需要独立通信管道。
 
 工具入参 Schema 直接复用 `core` 中的 Zod 定义；工具描述中明确写出“**修改图谱请调用 `propose_graph_patch`，不要直接编辑 `.tgraph.json`**”。
 

@@ -21,7 +21,7 @@ import {
   resolveWorkspaceRoot
 } from "./workspace.js";
 import { listWorkspaceGraphs } from "./store.js";
-import { startWorkbenchServer } from "./server.js";
+import { ensureWorkspaceService } from "./service.js";
 import { runMcpStdioServer } from "./mcp.js";
 import {
   applyPatchById,
@@ -332,7 +332,7 @@ export function createProgram(): Command {
 
   program
     .command("serve [dir]")
-    .description("Start the local ThoughtChain Web Workbench server (127.0.0.1 + SSE)")
+    .description("Start or reuse the workspace Web + HTTP MCP service (127.0.0.1)")
     .option("-p, --port <port>", "Preferred port (auto-increments if occupied)", "4377")
     .action(async (dir: string | undefined, opts: { port: string }) => {
       const globalOpts = program.opts<{ dir?: string }>();
@@ -348,7 +348,7 @@ export function createProgram(): Command {
       }
 
       try {
-        const running = await startWorkbenchServer({
+        const running = await ensureWorkspaceService({
           workspaceRoot: workspace,
           port: parsedPort
         });
@@ -359,7 +359,11 @@ export function createProgram(): Command {
           host: running.host,
           port: running.port,
           url: running.url,
-          graphs: running.store.listSummaries().map((g) => ({
+          mcpUrl: running.mcpUrl,
+          tokenFile: path.join(running.workspaceRoot, ".thoughtchain", ".server-token"),
+          reused: running.reused,
+          pid: running.pid,
+          graphs: listWorkspaceGraphs(running.workspaceRoot).map((g) => ({
             id: g.id,
             title: g.title,
             valid: g.valid,
@@ -367,8 +371,10 @@ export function createProgram(): Command {
           }))
         });
 
+        if (!running.server) return;
+        const ownedServer = running.server;
         const shutdown = async () => {
-          await running.close();
+          await ownedServer.close();
           process.exit(0);
         };
         process.once("SIGINT", () => void shutdown());
@@ -385,7 +391,7 @@ export function createProgram(): Command {
   // ── Phase 2: MCP stdio server (PRD §7.4 / §7.5) ──────────────────────────
   program
     .command("mcp [dir]")
-    .description("Start the ThoughtChain MCP server over stdio (read + patch-only)")
+    .description("Start a private stdio MCP subprocess; for shared use, connect to tchain serve's /mcp URL")
     .action(async (dir?: string) => {
       const globalOpts = program.opts<{ dir?: string }>();
       const workspace = resolveWorkspaceRoot(dir ?? globalOpts.dir);

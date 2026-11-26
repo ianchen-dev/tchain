@@ -13,6 +13,9 @@ const GITIGNORE_ENTRIES = [
   "patches/archive/",
   "history/",
   "ui-state.json",
+  "server.json",
+  ".server-token",
+  ".server-start.lock/",
   ".lock"
 ];
 

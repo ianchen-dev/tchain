@@ -18,6 +18,7 @@ import {
   summarizeOps
 } from "@tchain/core";
 import { resolveSafeWorkspaceFile } from "./files.js";
+import { handleMcpHttpRequest } from "./mcp.js";
 import {
   applyPatchById,
   createManualCheckpoint,
@@ -43,6 +44,7 @@ export interface StartServerOptions {
   webDistDir?: string;
   watch?: boolean;
   manualSnapshotIdleMs?: number;
+  instanceId?: string;
 }
 
 export interface RunningServer {
@@ -152,6 +154,7 @@ export function createWorkbenchApp(params: {
   token: string;
   getPort: () => number;
   webDistDir: string | null;
+  instanceId?: string;
 }): Hono {
   const { store, token, getPort, webDistDir } = params;
   const app = new Hono();
@@ -185,7 +188,7 @@ export function createWorkbenchApp(params: {
 
     const secFetchSite = c.req.header("sec-fetch-site");
     if (
-      c.req.path.startsWith("/api/") &&
+      (c.req.path.startsWith("/api/") || c.req.path === "/mcp") &&
       secFetchSite &&
       secFetchSite !== "same-origin" &&
       secFetchSite !== "none"
@@ -205,7 +208,7 @@ export function createWorkbenchApp(params: {
   });
 
   // 2. Token authentication middleware for all /api/* routes
-  app.use("/api/*", async (c, next) => {
+  const requireToken = async (c: Context, next: () => Promise<void>) => {
     const reqToken = extractRequestToken(c);
     if (!safeTokenEquals(reqToken, token)) {
       return c.json(
@@ -218,13 +221,20 @@ export function createWorkbenchApp(params: {
       );
     }
     await next();
-  });
+  };
+  app.use("/api/*", requireToken);
+  app.use("/mcp", requireToken);
+
+  app.all("/mcp", (c) => handleMcpHttpRequest(store.workspaceRoot, c.req.raw));
 
   // 3. Read API endpoints
   app.get("/api/health", (c) => {
     return c.json({
       ok: true,
       version: "0.1.0",
+      pid: process.pid,
+      instanceId: params.instanceId,
+      mcpUrl: `http://127.0.0.1:${getPort()}/mcp`,
       workspaceRoot: store.workspaceRoot,
       graphCount: store.listSummaries().length
     });
@@ -927,10 +937,18 @@ export async function startWorkbenchServer(
     store,
     token,
     getPort: () => boundPort,
-    webDistDir
+    webDistDir,
+    instanceId: options.instanceId
   });
 
-  const { server, port } = await listenWithPortIncrement(app, startPort, maxAttempts);
+  let listener: { server: http.Server; port: number };
+  try {
+    listener = await listenWithPortIncrement(app, startPort, maxAttempts);
+  } catch (err) {
+    await store.close();
+    throw err;
+  }
+  const { server, port } = listener;
   boundPort = port;
 
   if (options.watch !== false) {

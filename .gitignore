@@ -7,3 +7,6 @@ coverage/
 .thoughtchain/history/
 .thoughtchain/ui-state.json
 .thoughtchain/.lock
+.thoughtchain/server.json
+.thoughtchain/.server-token
+.thoughtchain/.server-start.lock/

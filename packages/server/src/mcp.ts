@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import {
   ApplyError,
@@ -248,4 +249,23 @@ export async function runMcpStdioServer(workspaceDir?: string): Promise<void> {
   const server = createThoughtChainMcpServer(workspaceDir);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+/** Each request has isolated protocol state; all clients share the host process. */
+export async function handleMcpHttpRequest(workspaceRoot: string, request: Request): Promise<Response> {
+  // These tools need neither server-initiated messages nor persistent sessions.
+  if (request.method !== "POST") {
+    return new Response(null, { status: 405, headers: { Allow: "POST" } });
+  }
+  const server = createThoughtChainMcpServer(workspaceRoot);
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true
+  });
+  try {
+    await server.connect(transport);
+    return await transport.handleRequest(request);
+  } finally {
+    await server.close();
+  }
 }
