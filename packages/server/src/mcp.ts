@@ -3,8 +3,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import {
+  ActivityTimeRangeError,
   ApplyError,
+  compileActivity,
   compileContext,
+  compileWorkspaceActivity,
   getGraphOverview,
   OpSchema,
   searchNodes,
@@ -13,6 +16,7 @@ import {
 import { listWorkspaceGraphs } from "./store.js";
 import {
   listPendingPatches,
+  loadWorkspaceValidGraphs,
   NotFoundError,
   proposePatch,
   readValidatedGraph
@@ -32,8 +36,8 @@ function jsonTextResult(payload: unknown, isError = false) {
 }
 
 /**
- * Creates the ThoughtChain MCP Server with strictly 5 tools (PRD §7.5):
- * 4 read-only discovery tools + 1 patch-only proposal tool.
+ * Creates the ThoughtChain MCP Server with strictly 6 tools (PRD §7.5):
+ * 5 read-only discovery tools + 1 patch-only proposal tool.
  * Deliberately exposes NO direct graph write tool.
  */
 export function createThoughtChainMcpServer(workspaceDir?: string): McpServer {
@@ -183,7 +187,101 @@ export function createThoughtChainMcpServer(workspaceDir?: string): McpServer {
     }
   );
 
-  // 5. propose_graph_patch (ONLY mutation tool — never edits .tgraph.json directly!)
+  // 5. get_graph_activity
+  server.tool(
+    "get_graph_activity",
+    "时间维度的活动简报 / 周报素材编译器。按节点 createdAt / updatedAt / statusChangedAt 提取指定时间窗内的完成、推进、阻塞/搁置/否决与新增节点，并附带当前持续阻塞、无更新进行中节点及下一步就绪前沿；省略 graphId 时自动汇总工作区全部图谱。修改图谱请调用 propose_graph_patch，不要直接编辑 .tgraph.json。",
+    {
+      graphId: z.string().min(1).optional().describe("可选，图谱 ID；省略时自动汇总工作区所有有效图谱"),
+      since: z
+        .string()
+        .optional()
+        .describe("起始时间表达式，默认 7d（支持 24h/7d/4w、this-week、last-week、YYYY-MM-DD、ISO-8601）"),
+      until: z.string().optional().describe("结束时间表达式，默认当前时刻（支持 YYYY-MM-DD 或 ISO-8601）"),
+      format: z.enum(["md", "json"]).optional().describe("输出格式：md（默认，省 token）或 json"),
+      maxTokens: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("最大估算 token 数；超出时按 ⑥ → ④ → ⑤(进行中) → ② 顺序裁剪"),
+      includeNext: z.boolean().optional().describe("是否包含「⑥ 下一步就绪前沿」，默认 true")
+    },
+    async ({ graphId, since, until, format, maxTokens, includeNext }) => {
+      try {
+        const opts = {
+          since,
+          until,
+          format: format ?? ("md" as const),
+          maxTokens,
+          includeNext: includeNext ?? true
+        };
+        if (graphId) {
+          const loaded = readValidatedGraph(workspaceRoot, graphId);
+          const compiled = compileActivity(loaded.graph, opts);
+          if (compiled.format === "md") {
+            return {
+              content: [{ type: "text" as const, text: compiled.text }]
+            };
+          }
+          return jsonTextResult({
+            ok: true,
+            estimatedTokens: compiled.estimatedTokens,
+            data: compiled.data
+          });
+        }
+
+        const { graphs, skipped } = loadWorkspaceValidGraphs(workspaceRoot);
+        const compiled = compileWorkspaceActivity(graphs, {
+          ...opts,
+          skippedGraphs: skipped
+        });
+        if (compiled.format === "md") {
+          return {
+            content: [{ type: "text" as const, text: compiled.text }]
+          };
+        }
+        return jsonTextResult({
+          ok: true,
+          estimatedTokens: compiled.estimatedTokens,
+          data: compiled.data
+        });
+      } catch (err) {
+        if (err instanceof ActivityTimeRangeError) {
+          return jsonTextResult(
+            {
+              ok: false,
+              code: err.code,
+              message: err.message,
+              hint: err.hint
+            },
+            true
+          );
+        }
+        if (err instanceof ApplyError) {
+          return jsonTextResult(
+            {
+              ok: false,
+              code: "VALIDATION_ERROR",
+              message: err.message,
+              diagnostics: err.diagnostics
+            },
+            true
+          );
+        }
+        return jsonTextResult(
+          {
+            ok: false,
+            code: err instanceof NotFoundError ? "GRAPH_NOT_FOUND" : "ACTIVITY_ERROR",
+            message: err instanceof Error ? err.message : String(err)
+          },
+          true
+        );
+      }
+    }
+  );
+
+  // 6. propose_graph_patch (ONLY mutation tool — never edits .tgraph.json directly!)
   server.tool(
     "propose_graph_patch",
     "提交思维链图谱变更提案（Patch）。修改图谱请调用 propose_graph_patch，不要直接编辑 .tgraph.json。服务端会立即执行完整语义校验，合法时写入 .thoughtchain/patches/ 待用户在工作台审查后落盘；不合法时返回带 code/path/hint 的结构化错误供自行修正。节点时间戳（createdAt / updatedAt / statusChangedAt）由系统在应用时自动维护，无需在 ops 中填写。",

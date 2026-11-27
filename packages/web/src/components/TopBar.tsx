@@ -26,6 +26,7 @@ import {
   X
 } from "lucide-react";
 import { useWorkbenchStore } from "../store.js";
+import { ActivityReportMenu } from "./ActivityReportMenu.js";
 
 const VIEW_OPTIONS: Array<{ id: ViewMode; label: string; icon: typeof Layers }> = [
   { id: "workspace", label: "工作态", icon: Layers },
@@ -272,6 +273,8 @@ export function TopBar() {
                 <History size={14} />
                 <span>历史</span>
               </button>
+
+              <ActivityReportMenu />
 
               {pendingPatches.length > 0 && (
                 <button

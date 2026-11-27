@@ -2457,3 +2457,83 @@ body,
   font-size: 11.5px;
   opacity: 0.9;
 }
+
+/* Activity / Weekly Report Popover */
+.tc-activity-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.tc-activity-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 268px;
+  padding: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+  z-index: 70;
+  white-space: normal;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tc-activity-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tc-activity-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.tc-activity-choices {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tc-activity-choice {
+  flex: 1 1 auto;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.tc-activity-choice:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.tc-activity-choice-active {
+  background: var(--brand-soft);
+  color: var(--brand);
+  border-color: #93c5fd;
+  font-weight: 600;
+}
+
+.tc-activity-copy-btn {
+  width: 100%;
+  justify-content: center;
+  gap: 6px;
+}
+
+.tc-activity-hint {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}

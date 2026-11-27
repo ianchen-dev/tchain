@@ -1,4 +1,6 @@
 import type {
+  CompiledActivityData,
+  CompiledWorkspaceActivityData,
   Diagnostic,
   Graph,
   HistoryEntry,
@@ -131,6 +133,22 @@ export interface RollbackResponse {
   rolledBackToRev: number;
   savedRev: HistoryEntry;
   warnings: Diagnostic[];
+}
+
+export interface ActivityApiResponse {
+  ok: true;
+  format: "md" | "json";
+  text: string;
+  estimatedTokens: number;
+  data: CompiledActivityData;
+}
+
+export interface WorkspaceActivityApiResponse {
+  ok: true;
+  format: "md" | "json";
+  text: string;
+  estimatedTokens: number;
+  data: CompiledWorkspaceActivityData;
 }
 
 export class ApiRequestError extends Error {
@@ -336,4 +354,44 @@ export async function fetchWorkspaceTextFile(posixPath: string): Promise<string>
 
 export function buildWorkspaceFileUrl(posixPath: string): string {
   return `/api/files?path=${encodeURIComponent(posixPath)}`;
+}
+
+export interface ActivityQueryParams {
+  since?: string;
+  until?: string;
+  format?: "md" | "json";
+  maxTokens?: number;
+  includeNext?: boolean;
+}
+
+function buildActivityQueryString(params?: ActivityQueryParams): string {
+  if (!params) return "";
+  const sp = new URLSearchParams();
+  if (params.since) sp.set("since", params.since);
+  if (params.until) sp.set("until", params.until);
+  if (params.format) sp.set("format", params.format);
+  if (params.maxTokens !== undefined) sp.set("maxTokens", String(params.maxTokens));
+  if (params.includeNext !== undefined) sp.set("includeNext", String(params.includeNext));
+  const qs = sp.toString();
+  return qs ? `?${qs}` : "";
+}
+
+export async function fetchGraphActivity(
+  graphId: string,
+  params?: ActivityQueryParams
+): Promise<ActivityApiResponse> {
+  const res = await fetch(
+    `/api/graphs/${encodeURIComponent(graphId)}/activity${buildActivityQueryString(params)}`,
+    { credentials: "same-origin" }
+  );
+  return await parseJsonOrThrow<ActivityApiResponse>(res);
+}
+
+export async function fetchWorkspaceActivity(
+  params?: ActivityQueryParams
+): Promise<WorkspaceActivityApiResponse> {
+  const res = await fetch(`/api/activity${buildActivityQueryString(params)}`, {
+    credentials: "same-origin"
+  });
+  return await parseJsonOrThrow<WorkspaceActivityApiResponse>(res);
 }

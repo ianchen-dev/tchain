@@ -22,7 +22,8 @@ import {
   type Op,
   type OpSummaryCounts,
   type PatchEvaluation,
-  type PatchFile
+  type PatchFile,
+  type SkippedGraphNotice
 } from "@tchain/core";
 import {
   HISTORY_SUBDIR,
@@ -176,6 +177,52 @@ export function readValidatedGraph(
     hash: hashGraph(graph),
     warnings: validation.warnings
   };
+}
+
+export function loadWorkspaceValidGraphs(workspaceRoot: string): {
+  graphs: Graph[];
+  skipped: SkippedGraphNotice[];
+} {
+  const files = resolveGraphFiles(workspaceRoot);
+  const fileExists = makeFileExistsChecker(workspaceRoot);
+  const graphs: Graph[] = [];
+  const skipped: SkippedGraphNotice[] = [];
+
+  for (const filePath of files) {
+    const relFile = path.relative(workspaceRoot, filePath).replace(/\\/g, "/");
+    const base = path.basename(filePath);
+    const fallbackId = base.endsWith(".tgraph.json")
+      ? base.slice(0, -".tgraph.json".length)
+      : base;
+
+    let parsed: unknown;
+    try {
+      const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      skipped.push({
+        id: fallbackId,
+        file: relFile,
+        reason: err instanceof Error ? err.message : String(err)
+      });
+      continue;
+    }
+
+    const validation = validateGraph(parsed, { fileExists });
+    if (!validation.ok) {
+      const partial = parsed as Partial<Graph>;
+      skipped.push({
+        id: typeof partial.id === "string" ? partial.id : fallbackId,
+        file: relFile,
+        reason: validation.errors[0]?.message ?? "图谱校验失败"
+      });
+      continue;
+    }
+
+    graphs.push(parsed as Graph);
+  }
+
+  return { graphs, skipped };
 }
 
 // ── History Snapshots (PRD §5.1 / §7.6) ─────────────────────────────────────

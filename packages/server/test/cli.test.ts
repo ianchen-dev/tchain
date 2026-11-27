@@ -144,4 +144,105 @@ describe("tchain Phase 0 CLI", () => {
     expect(parsed.targetNodeId).toBe("K3");
     expect(parsed.avoidConstraints.length).toBeGreaterThanOrEqual(2);
   });
+
+  it("activity compiles Markdown and JSON for single graph, workspace summary, and rejects invalid time range", () => {
+    const dir = makeTempDir();
+    runCli(["init", dir], dir);
+    const nowIso = new Date().toISOString();
+    const g1Path = path.join(dir, ".thoughtchain", "graphs", "alpha.tgraph.json");
+    const g2Path = path.join(dir, ".thoughtchain", "graphs", "beta.tgraph.json");
+    const badPath = path.join(dir, ".thoughtchain", "graphs", "corrupt.tgraph.json");
+
+    fs.writeFileSync(
+      g1Path,
+      JSON.stringify({
+        schemaVersion: 1,
+        id: "alpha",
+        title: "Alpha 图谱",
+        nodes: [
+          { id: "G", type: "goal", title: "总目标" },
+          {
+            id: "T1",
+            parentId: "G",
+            type: "task",
+            title: "本周完成任务",
+            status: "done",
+            conclusion: "已完成验证",
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            statusChangedAt: nowIso
+          },
+          {
+            id: "T2",
+            parentId: "G",
+            type: "task",
+            title: "就绪任务",
+            status: "todo"
+          }
+        ],
+        edges: []
+      }),
+      "utf8"
+    );
+
+    fs.writeFileSync(
+      g2Path,
+      JSON.stringify({
+        schemaVersion: 1,
+        id: "beta",
+        title: "Beta 无变化图谱",
+        nodes: [
+          {
+            id: "B1",
+            type: "task",
+            title: "历史已完成",
+            status: "done",
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+            statusChangedAt: "2026-01-01T00:00:00Z"
+          }
+        ],
+        edges: []
+      }),
+      "utf8"
+    );
+
+    fs.writeFileSync(badPath, "{ bad json", "utf8");
+
+    // 1. Single graph md
+    const singleMd = runCli(["activity", "alpha", "--since", "7d"], dir);
+    expect(singleMd.status).toBe(0);
+    expect(singleMd.stdout).toContain("# 活动简报：Alpha 图谱（alpha）");
+    expect(singleMd.stdout).toContain("## ① 本周完成（1）");
+    expect(singleMd.stdout).toContain("T1 本周完成任务");
+    expect(singleMd.stdout).toContain("## ⑥ 下一步就绪前沿");
+
+    // 2. Single graph json + --no-next
+    const singleJson = runCli(
+      ["activity", "alpha", "--format", "json", "--no-next"],
+      dir
+    );
+    expect(singleJson.status).toBe(0);
+    const parsedSingle = JSON.parse(singleJson.stdout);
+    expect(parsedSingle.graphId).toBe("alpha");
+    expect(parsedSingle.counts.done).toBe(1);
+    expect(parsedSingle.sections.nextReady).toEqual([]);
+
+    // 3. Workspace summary (omitted [graph]) folds unchanged beta and notes corrupt graph
+    const wsMd = runCli(["activity", "--since", "7d"], dir);
+    expect(wsMd.status).toBe(0);
+    expect(wsMd.stdout).toContain("# 工作区活动简报汇总（2 张图谱）");
+    expect(wsMd.stdout).toContain("已跳过校验失败图谱：corrupt");
+    expect(wsMd.stdout).toContain("Beta 无变化图谱 (`beta`)");
+    expect(wsMd.stdout).toContain("本区间无变化");
+    expect(wsMd.stdout).toContain("## Alpha 图谱（alpha）");
+    expect(wsMd.stdout).not.toContain("## Beta 无变化图谱（beta）");
+
+    // 4. Invalid --since exits 1 with INVALID_TIME_RANGE
+    const invalidRes = runCli(["activity", "--since", "invalid"], dir);
+    expect(invalidRes.status).toBe(1);
+    const invalidJson = JSON.parse(invalidRes.stdout);
+    expect(invalidJson.ok).toBe(false);
+    expect(invalidJson.code).toBe("INVALID_TIME_RANGE");
+  });
 });

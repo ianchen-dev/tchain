@@ -1,7 +1,7 @@
 # 思维链决策工作台（ThoughtChain Workbench）产品需求文档（PRD）
 
-> **文档状态**：v1.3（新增节点级时间戳：Schema、管线自动维护与 Undo/Redo 精确还原、外部变更自动补齐回写、Inspector 时间展示）  
-> **更新日期**：2026-11-26  
+> **文档状态**：v1.4（新增「周报自动生成 / 活动简报」独立功能规范链接）  
+> **更新日期**：2026-11-27  
 > **参考样板**：`新需求-思维链图.md`（业务仓库 `finance-news-flash/docs/feature/个股公告分析管道/全市场公告采集解析与多空分析/新需求-思维链图.md`）  
 > **0 号样板图**：[fixtures/announcement-pipeline.tgraph.json](../fixtures/announcement-pipeline.tgraph.json)  
 > **目标平台**：PC 桌面端浏览器（个人本机使用 + 现场投屏汇报）+ CLI / MCP 协议
@@ -13,6 +13,7 @@
 | v1.1 | 范围收敛：纯自动排版、单源三视图、不内置 LLM、三道信任防线 |
 | v1.2 | 新增 `parked` 状态与容器状态汇总；`summary` 拆为 `description` / `conclusion`；删除 `order`、`rejected_branch`、边 `id`；新增唯一位置原则与环约束；所有写入统一为 ops 管线，Patch 增加 `baseHash` / `before` / `deps`；外部直接改文件纳入审查；规定 `project()` 投影流水线并修正焦点算法；补充锁 + CAS、本地服务安全；推送改为 SSE；路线图新增 Phase 0，Phase 1 只读 |
 | v1.3 | 新增节点级可选时间戳 `createdAt` / `updatedAt` / `statusChangedAt`（边暂不加）；由 `applyOps` 统一自动维护并在 Undo/Redo 中精确还原；容器动态派生 `subtreeUpdatedAt`；接受外部文件变更时自动补齐/刷新变更节点时间戳并回写磁盘；Inspector 抽屉新增时间记录展示 |
+| v1.4 | 新增独立功能规范 [周报自动生成（Activity）](./features/weekly-report.md)：基于节点时间戳与当前图态的确定性活动简报编译、CLI `tchain activity`、MCP `get_graph_activity`、HTTP API 与 Web 顶栏轻入口设计 |
 
 ---
 
@@ -432,6 +433,7 @@ flowchart LR
 | `project(graph, viewState)` | 投影流水线（§6.1） |
 | `focus(graph)` | 焦点集合（§6.3） |
 | `compileContext(graph, nodeId, opts)` | 上下文编译器（§7.5） |
+| `compileActivity(graph, opts)` / `compileWorkspaceActivity(graphs, opts)` | 时间窗活动简报与周报素材编译（详见 [周报自动生成](./features/weekly-report.md)） |
 
 ### 7.2 原子操作集合（5 种）
 
@@ -494,6 +496,7 @@ flowchart LR
 | `tchain init [dir]` | 初始化 `.thoughtchain/`，生成 `tgraph.schema.json` 和 `.gitignore` 片段 | P0 |
 | `tchain validate [graph]` | 校验图谱，输出结构化错误与警告；失败时退出码非 0 | P0 |
 | `tchain context <graph> [--node <id>] [--format md\|json] [--max-tokens N]` | 上下文编译器 | P0 |
+| `tchain activity [graph] [--since 7d] [--until ...] [--format md\|json] [--max-tokens N] [--no-next]` | 时间窗活动简报与周报素材编译（详见 [周报自动生成](./features/weekly-report.md)） | 扩展 |
 | `tchain fmt [graph]` | 按规范化规则重写图谱文件 | P0 |
 | `tchain serve [dir] [--port 4377]` | 幂等启动/复用该工作区 Web 工作台 + 文件监听 + SSE + HTTP MCP；新服务端口被占用时自动递增 | P1/P2 |
 | `tchain list` | 列出所有图谱与状态摘要（进行中/待办/阻塞/搁置节点数） | P1 |
@@ -524,10 +527,11 @@ flowchart LR
 
    超出 `maxTokens` 时，按 ⑥ → ④ → ② 的顺序裁剪远端内容。
 4. `search_nodes(graphId, query, status?)`：按关键词或状态检索节点。
+5. `get_graph_activity(graphId?, since = "7d", until?, format = "md", maxTokens?, includeNext = true)`：时间窗活动简报与周报素材编译；省略 `graphId` 时汇总工作区全部图谱（详见 [周报自动生成](./features/weekly-report.md)）。
 
 #### 写入提案工具（Patch-Only Mutation）
 
-5. `propose_graph_patch(graphId, title, rationale, ops[])`：
+6. `propose_graph_patch(graphId, title, rationale, ops[])`：
    - 操作集合见 §7.2；节点时间戳（`createdAt` / `updatedAt` / `statusChangedAt`）由系统在用户审查应用时自动维护，Agent 无需在提案 `ops` 中手填；
    - 服务端立即执行完整校验（§5.7）。不合法时返回结构化错误，Agent 可以据此自行修正；合法时写入 `patches/`，并返回 `patchId` 与警告列表；
    - **不提供任何直接写图的 MCP 工具**。

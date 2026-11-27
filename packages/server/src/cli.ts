@@ -3,11 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import {
+  ActivityTimeRangeError,
   ApplyError,
+  compileActivity,
   compileContext,
+  compileWorkspaceActivity,
   computeFocus,
   evaluatePatchAgainstGraph,
   hashGraph,
+  parseActivityWindow,
   serializeGraph,
   validateGraph,
   type Diagnostic,
@@ -27,6 +31,7 @@ import {
   applyPatchById,
   findPatchRecord,
   listPendingPatches,
+  loadWorkspaceValidGraphs,
   NotFoundError,
   proposePatch,
   readHistoryIndex,
@@ -309,6 +314,149 @@ export function createProgram(): Command {
           printJson({
             ok: false,
             error: err instanceof Error ? err.message : String(err)
+          });
+          process.exitCode = 1;
+        }
+      }
+    );
+
+  program
+    .command("activity [graph]")
+    .description("Compile time-windowed activity / weekly report materials (Markdown or JSON)")
+    .option("--since <expr>", "Start time expression (24h/7d/4w, this-week, last-week, YYYY-MM-DD, ISO-8601)", "7d")
+    .option("--until <expr>", "End time expression (YYYY-MM-DD or ISO-8601)")
+    .option("-f, --format <format>", "Output format: md or json", "md")
+    .option("--max-tokens <n>", "Maximum estimated tokens (truncates ⑥ → ④ → ⑤(进行中) → ②)")
+    .option("--no-next", "Omit section ⑥ next ready frontier")
+    .action(
+      (
+        graphArg: string | undefined,
+        opts: {
+          since?: string;
+          until?: string;
+          format?: string;
+          maxTokens?: string;
+          next: boolean;
+        }
+      ) => {
+        const globalOpts = program.opts<{ dir?: string }>();
+        const workspace = resolveWorkspaceRoot(globalOpts.dir);
+
+        if (opts.format !== undefined && opts.format !== "md" && opts.format !== "json") {
+          printJson({
+            ok: false,
+            code: "INVALID_FORMAT",
+            error: `Invalid --format value: ${opts.format}`
+          });
+          process.exitCode = 1;
+          return;
+        }
+        const format = opts.format === "json" ? "json" : "md";
+
+        let maxTokens: number | undefined;
+        if (opts.maxTokens !== undefined) {
+          const parsedMax = Number.parseInt(opts.maxTokens, 10);
+          if (!Number.isFinite(parsedMax) || parsedMax <= 0 || String(parsedMax) !== opts.maxTokens.trim()) {
+            printJson({
+              ok: false,
+              code: "INVALID_MAX_TOKENS",
+              error: `Invalid --max-tokens value: ${opts.maxTokens}`
+            });
+            process.exitCode = 1;
+            return;
+          }
+          maxTokens = parsedMax;
+        }
+
+        try {
+          parseActivityWindow({ since: opts.since, until: opts.until });
+        } catch (err) {
+          if (err instanceof ActivityTimeRangeError) {
+            printJson({
+              ok: false,
+              code: err.code,
+              error: err.message,
+              hint: err.hint
+            });
+          } else {
+            printJson({
+              ok: false,
+              code: "INVALID_TIME_RANGE",
+              error: err instanceof Error ? err.message : String(err)
+            });
+          }
+          process.exitCode = 1;
+          return;
+        }
+
+        const compileOpts = {
+          since: opts.since,
+          until: opts.until,
+          format,
+          maxTokens,
+          includeNext: opts.next
+        } as const;
+
+        if (!graphArg) {
+          try {
+            const { graphs, skipped } = loadWorkspaceValidGraphs(workspace);
+            const result = compileWorkspaceActivity(graphs, {
+              ...compileOpts,
+              skippedGraphs: skipped
+            });
+            process.stdout.write(result.text);
+          } catch (err) {
+            printJson({
+              ok: false,
+              code: err instanceof ActivityTimeRangeError ? err.code : "ACTIVITY_ERROR",
+              error: err instanceof Error ? err.message : String(err),
+              ...(err instanceof ActivityTimeRangeError ? { hint: err.hint } : {})
+            });
+            process.exitCode = 1;
+          }
+          return;
+        }
+
+        const files = resolveGraphFiles(workspace, graphArg);
+        if (files.length === 0) {
+          printJson({
+            ok: false,
+            code: "GRAPH_NOT_FOUND",
+            error: `Graph not found: ${graphArg}`
+          });
+          process.exitCode = 1;
+          return;
+        }
+
+        const parsed = readJsonFile(files[0]!);
+        if (!parsed.ok) {
+          printJson({ ok: false, code: "JSON_PARSE_ERROR", error: parsed.error });
+          process.exitCode = 1;
+          return;
+        }
+
+        const fileExists = makeFileExistsChecker(workspace);
+        const validation = validateGraph(parsed.data, { fileExists });
+        if (!validation.ok) {
+          printJson({
+            ok: false,
+            code: "VALIDATION_ERROR",
+            error: "Graph failed validation; fix errors before compiling activity",
+            errors: validation.errors
+          });
+          process.exitCode = 1;
+          return;
+        }
+
+        try {
+          const result = compileActivity(parsed.data as Graph, compileOpts);
+          process.stdout.write(result.text);
+        } catch (err) {
+          printJson({
+            ok: false,
+            code: err instanceof ActivityTimeRangeError ? err.code : "ACTIVITY_ERROR",
+            error: err instanceof Error ? err.message : String(err),
+            ...(err instanceof ActivityTimeRangeError ? { hint: err.hint } : {})
           });
           process.exitCode = 1;
         }

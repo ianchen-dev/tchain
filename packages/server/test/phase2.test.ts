@@ -552,7 +552,7 @@ describe("Phase 2: Unified ops pipeline, CAS 409, Patch conflict rebase, Rollbac
     expect(rbOut.rolledBackToRev).toBe(1);
   });
 
-  it("exposes strictly 5 MCP tools over stdio, compiles context, writes patches, and rejects invalid patches", async () => {
+  it("exposes strictly 6 MCP tools over stdio, compiles context & activity, writes patches, and rejects invalid patches", async () => {
     const dir = makeTempWorkspace();
     const transport = new StdioClientTransport({
       command: process.execPath,
@@ -563,10 +563,11 @@ describe("Phase 2: Unified ops pipeline, CAS 409, Patch conflict rebase, Rollbac
     try {
       await client.connect(transport);
 
-      // 1. Verify strictly 5 tools (no direct graph write tool)
+      // 1. Verify strictly 6 tools (no direct graph write tool)
       const listed = await client.listTools();
       const toolNames = listed.tools.map((t) => t.name).sort();
       expect(toolNames).toEqual([
+        "get_graph_activity",
         "get_graph_overview",
         "get_node_context",
         "list_graphs",
@@ -608,6 +609,35 @@ describe("Phase 2: Unified ops pipeline, CAS 409, Patch conflict rebase, Rollbac
       });
       const srchJson = JSON.parse((srch.content as Array<{ text: string }>)[0]!.text);
       expect(srchJson.count).toBeGreaterThanOrEqual(2);
+
+      // 5b. get_graph_activity (single graph md, workspace json, invalid since error)
+      const actMd = await client.callTool({
+        name: "get_graph_activity",
+        arguments: { graphId: "announcement-pipeline", since: "7d", format: "md" }
+      });
+      expect(actMd.isError).toBeFalsy();
+      const actMdText = (actMd.content as Array<{ text: string }>)[0]!.text;
+      expect(actMdText).toContain("# 活动简报：");
+      expect(actMdText).toContain("## ① 本周完成");
+      expect(actMdText).toContain("## ⑤ 持续阻塞与进行中（本周无更新）");
+
+      const actWorkspaceJson = await client.callTool({
+        name: "get_graph_activity",
+        arguments: { format: "json" }
+      });
+      expect(actWorkspaceJson.isError).toBeFalsy();
+      const actWsParsed = JSON.parse((actWorkspaceJson.content as Array<{ text: string }>)[0]!.text);
+      expect(actWsParsed.ok).toBe(true);
+      expect(actWsParsed.data.graphCount).toBe(1);
+      expect(actWsParsed.data.graphs[0].graphId).toBe("announcement-pipeline");
+
+      const badAct = await client.callTool({
+        name: "get_graph_activity",
+        arguments: { since: "not-a-valid-range" }
+      });
+      expect(badAct.isError).toBe(true);
+      const badActJson = JSON.parse((badAct.content as Array<{ text: string }>)[0]!.text);
+      expect(badActJson.code).toBe("INVALID_TIME_RANGE");
 
       // 6. propose_graph_patch with INVALID ops (parentId cycle / missing endpoint / duplicate id)
       const badPatch = await client.callTool({

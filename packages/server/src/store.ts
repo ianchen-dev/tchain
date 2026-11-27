@@ -17,6 +17,7 @@ import {
   type Op,
   type OpSummaryCounts,
   type PatchOp,
+  type SkippedGraphNotice,
   type Status
 } from "@tchain/core";
 import {
@@ -890,6 +891,26 @@ export class WorkspaceStore {
 
   getEntry(graphId: string): StoredGraphEntry | undefined {
     return this.entries.get(graphId);
+  }
+
+  listValidGraphs(): { graphs: Graph[]; skipped: SkippedGraphNotice[] } {
+    const graphs: Graph[] = [];
+    const skipped: SkippedGraphNotice[] = [];
+    const entries = [...this.entries.values()].sort((a, b) => a.id.localeCompare(b.id));
+
+    for (const entry of entries) {
+      if (entry.lastValidGraph && entry.lastError === null) {
+        graphs.push(entry.lastValidGraph);
+      } else {
+        skipped.push({
+          id: entry.id,
+          file: entry.relFile,
+          reason: entry.lastError?.message ?? "图谱不可用或校验失败"
+        });
+      }
+    }
+
+    return { graphs, skipped };
   }
 
   listSummaries(): GraphSummaryItem[] {

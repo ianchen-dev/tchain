@@ -383,4 +383,81 @@ describe("tchain serve security, file boundaries, SSE hot-reload & tchain list",
 
     sseReq.destroy();
   });
+
+  it("exposes GET /api/activity and GET /api/graphs/:id/activity with token, Host, Origin & time validation", async () => {
+    const dir = makeTempWorkspace();
+    const srv = await startWorkbenchServer({
+      workspaceRoot: dir,
+      port: 14700,
+      token: "activity-http-token",
+      watch: false
+    });
+    runningServers.push(srv);
+    const authHeaders = { Authorization: `Bearer ${srv.token}` };
+
+    // 1. Auth / Host / Origin guards
+    const unauth = await rawHttpRequest({ port: srv.port, path: "/api/activity" });
+    expect(unauth.status).toBe(401);
+
+    const badHost = await rawHttpRequest({
+      port: srv.port,
+      path: "/api/graphs/announcement-pipeline/activity",
+      headers: { ...authHeaders, Host: `evil.local:${srv.port}` }
+    });
+    expect(badHost.status).toBe(403);
+    expect(JSON.parse(badHost.body).code).toBe("INVALID_HOST");
+
+    const badOrigin = await rawHttpRequest({
+      port: srv.port,
+      path: "/api/activity",
+      headers: { ...authHeaders, Origin: "https://evil.example" }
+    });
+    expect(badOrigin.status).toBe(403);
+    expect(JSON.parse(badOrigin.body).code).toBe("INVALID_ORIGIN");
+
+    // 2. Valid workspace activity
+    const wsRes = await rawHttpRequest({
+      port: srv.port,
+      path: "/api/activity?since=7d&format=md",
+      headers: authHeaders
+    });
+    expect(wsRes.status).toBe(200);
+    const wsJson = JSON.parse(wsRes.body);
+    expect(wsJson.ok).toBe(true);
+    expect(wsJson.format).toBe("md");
+    expect(typeof wsJson.text).toBe("string");
+    expect(wsJson.text).toContain("# 工作区活动简报汇总");
+    expect(wsJson.data.graphCount).toBe(1);
+
+    // 3. Valid single-graph activity
+    const gRes = await rawHttpRequest({
+      port: srv.port,
+      path: "/api/graphs/announcement-pipeline/activity?since=this-week&format=json&includeNext=false",
+      headers: authHeaders
+    });
+    expect(gRes.status).toBe(200);
+    const gJson = JSON.parse(gRes.body);
+    expect(gJson.ok).toBe(true);
+    expect(gJson.format).toBe("json");
+    expect(gJson.data.graphId).toBe("announcement-pipeline");
+    expect(gJson.data.sections.nextReady).toEqual([]);
+
+    // 4. Invalid time range -> 400 INVALID_TIME_RANGE
+    const invalidTime = await rawHttpRequest({
+      port: srv.port,
+      path: "/api/graphs/announcement-pipeline/activity?since=2026-02-30",
+      headers: authHeaders
+    });
+    expect(invalidTime.status).toBe(400);
+    expect(JSON.parse(invalidTime.body).code).toBe("INVALID_TIME_RANGE");
+
+    // 5. Missing graph -> 404 GRAPH_NOT_FOUND
+    const missing = await rawHttpRequest({
+      port: srv.port,
+      path: "/api/graphs/non-existent/activity",
+      headers: authHeaders
+    });
+    expect(missing.status).toBe(404);
+    expect(JSON.parse(missing.body).code).toBe("GRAPH_NOT_FOUND");
+  });
 });

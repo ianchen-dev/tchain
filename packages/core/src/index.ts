@@ -10,3 +10,4 @@ export * from "./context.js";
 export * from "./project.js";
 export * from "./patch.js";
 export * from "./query.js";
+export * from "./activity.js";

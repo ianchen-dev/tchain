@@ -26,6 +26,7 @@ import {
   X
 } from "lucide-react";
 import { useWorkbenchStore } from "../store.js";
+import { copyTextToClipboard } from "../utils/clipboard.js";
 import { formatFullLocalTime, formatRelativeTime } from "../utils/time.js";
 import { MarkdownPreview } from "./MarkdownPreview.js";
 import { NODE_TYPE_META, STATUS_META } from "./statusMeta.js";
@@ -45,30 +46,6 @@ function buildVscodeUrl(workspaceRoot: string, posixPath: string): string {
   const root = workspaceRoot.replace(/\\/g, "/").replace(/\/+$/, "");
   const full = `${root}/${posixPath.replace(/^\/+/, "")}`;
   return `${full.startsWith("/") ? "vscode://file" : "vscode://file/"}${encodeURI(full)}`;
-}
-
-async function copyTextToClipboard(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // fallback below
-  }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.left = "-9999px";
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
 }
 
 export function InspectorDrawer() {

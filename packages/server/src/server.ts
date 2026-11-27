@@ -9,8 +9,11 @@ import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import {
+  ActivityTimeRangeError,
   ApplyError,
+  compileActivity,
   compileContext,
+  compileWorkspaceActivity,
   computeFocus,
   diffGraphs,
   HistorySourceSchema,
@@ -311,6 +314,132 @@ export function createWorkbenchApp(params: {
         {
           ok: false,
           code: "CONTEXT_ERROR",
+          message: err instanceof Error ? err.message : String(err)
+        },
+        400
+      );
+    }
+  });
+
+  const parseActivityQuery = (c: Context) => {
+    const sinceRaw = c.req.query("since");
+    const untilRaw = c.req.query("until");
+    const formatRaw = c.req.query("format");
+    if (formatRaw !== undefined && formatRaw !== "md" && formatRaw !== "json") {
+      return {
+        ok: false as const,
+        code: "INVALID_REQUEST",
+        message: `Invalid format parameter: ${formatRaw}`
+      };
+    }
+    const format: "md" | "json" = formatRaw === "json" ? "json" : "md";
+
+    const maxTokensRaw = c.req.query("maxTokens");
+    let maxTokens: number | undefined;
+    if (maxTokensRaw !== undefined && maxTokensRaw.trim() !== "") {
+      const parsed = Number.parseInt(maxTokensRaw, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0 || String(parsed) !== maxTokensRaw.trim()) {
+        return {
+          ok: false as const,
+          code: "INVALID_REQUEST",
+          message: `Invalid maxTokens parameter: ${maxTokensRaw}`
+        };
+      }
+      maxTokens = parsed;
+    }
+
+    const includeNextRaw = c.req.query("includeNext");
+    let includeNext = true;
+    if (includeNextRaw !== undefined && includeNextRaw !== "") {
+      if (includeNextRaw === "false") includeNext = false;
+      else if (includeNextRaw === "true") includeNext = true;
+      else {
+        return {
+          ok: false as const,
+          code: "INVALID_REQUEST",
+          message: `Invalid includeNext parameter: ${includeNextRaw}`
+        };
+      }
+    }
+
+    return {
+      ok: true as const,
+      options: {
+        ...(sinceRaw !== undefined && sinceRaw.trim() !== "" ? { since: sinceRaw } : {}),
+        ...(untilRaw !== undefined && untilRaw.trim() !== "" ? { until: untilRaw } : {}),
+        format,
+        maxTokens,
+        includeNext
+      }
+    };
+  };
+
+  app.get("/api/activity", (c) => {
+    const parsedQuery = parseActivityQuery(c);
+    if (!parsedQuery.ok) {
+      return c.json(
+        { ok: false, code: parsedQuery.code, message: parsedQuery.message },
+        400
+      );
+    }
+
+    try {
+      const { graphs, skipped } = store.listValidGraphs();
+      const result = compileWorkspaceActivity(graphs, {
+        ...parsedQuery.options,
+        skippedGraphs: skipped
+      });
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      if (err instanceof ActivityTimeRangeError) {
+        return c.json(
+          { ok: false, code: err.code, message: err.message, hint: err.hint },
+          400
+        );
+      }
+      return c.json(
+        {
+          ok: false,
+          code: "ACTIVITY_ERROR",
+          message: err instanceof Error ? err.message : String(err)
+        },
+        400
+      );
+    }
+  });
+
+  app.get("/api/graphs/:id/activity", (c) => {
+    const graphId = c.req.param("id");
+    const entry = store.getEntry(graphId);
+    if (!entry || !entry.lastValidGraph) {
+      return c.json(
+        { ok: false, code: "GRAPH_NOT_FOUND", message: `Graph not available: ${graphId}` },
+        404
+      );
+    }
+
+    const parsedQuery = parseActivityQuery(c);
+    if (!parsedQuery.ok) {
+      return c.json(
+        { ok: false, code: parsedQuery.code, message: parsedQuery.message },
+        400
+      );
+    }
+
+    try {
+      const result = compileActivity(entry.lastValidGraph, parsedQuery.options);
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      if (err instanceof ActivityTimeRangeError) {
+        return c.json(
+          { ok: false, code: err.code, message: err.message, hint: err.hint },
+          400
+        );
+      }
+      return c.json(
+        {
+          ok: false,
+          code: "ACTIVITY_ERROR",
           message: err instanceof Error ? err.message : String(err)
         },
         400

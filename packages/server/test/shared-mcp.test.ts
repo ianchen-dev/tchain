@@ -66,7 +66,7 @@ describe("shared workspace Web + HTTP MCP service", () => {
     const graphFile = path.join(dir, ".thoughtchain/graphs/announcement-pipeline.tgraph.json");
     const before = fs.readFileSync(graphFile, "utf8");
     const tools = await Promise.all([codex.listTools(), cursor.listTools()]);
-    expect(tools.map((t) => t.tools.length)).toEqual([5, 5]);
+    expect(tools.map((t) => t.tools.length)).toEqual([6, 6]);
     const proposals = await Promise.all([codex, cursor].map((client, i) => client.callTool({
       name: "propose_graph_patch",
       arguments: {
@@ -83,7 +83,7 @@ describe("shared workspace Web + HTTP MCP service", () => {
       expect(list.graphs[0].pendingPatchCount).toBe(2);
     }
     await codex.close();
-    expect((await cursor.listTools()).tools).toHaveLength(5);
+    expect((await cursor.listTools()).tools).toHaveLength(6);
   });
 
   it("isolates workspaces and rejects invalid authentication and cross-site requests", async () => {
