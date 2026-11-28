@@ -25,7 +25,7 @@ import {
   Undo2,
   X
 } from "lucide-react";
-import { useWorkbenchStore } from "../store.js";
+import { isAllExpanded, useWorkbenchStore } from "../store.js";
 import { ActivityReportMenu } from "./ActivityReportMenu.js";
 
 const VIEW_OPTIONS: Array<{ id: ViewMode; label: string; icon: typeof Layers }> = [
@@ -84,7 +84,8 @@ export function TopBar() {
   const setDimCrossHierarchyEdges = useWorkbenchStore((s) => s.setDimCrossHierarchyEdges);
   const setCommandPaletteOpen = useWorkbenchStore((s) => s.setCommandPaletteOpen);
   const triggerFitView = useWorkbenchStore((s) => s.triggerFitView);
-  const expandAll = useWorkbenchStore((s) => s.expandAll);
+  const toggleExpandAll = useWorkbenchStore((s) => s.toggleExpandAll);
+  const allExpanded = useWorkbenchStore(isAllExpanded);
   const undo = useWorkbenchStore((s) => s.undo);
   const redo = useWorkbenchStore((s) => s.redo);
   const openPatchReview = useWorkbenchStore((s) => s.openPatchReview);
@@ -183,11 +184,13 @@ export function TopBar() {
             type="button"
             className="tc-tool-btn"
             disabled={!graph}
-            title="展开当前视图全部容器，显示已搁置/已否决分支并返回全图"
-            onClick={expandAll}
+            title={allExpanded
+              ? "折叠当前视图全部容器，收起已搁置/已否决分支并返回全图"
+              : "展开当前视图全部容器，显示已搁置/已否决分支并返回全图"}
+            onClick={toggleExpandAll}
           >
             <ChevronsUpDown size={14} />
-            <span>全部展开</span>
+            <span>{allExpanded ? "全部折叠" : "全部展开"}</span>
           </button>
 
           {view === "focus" && (

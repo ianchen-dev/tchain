@@ -157,6 +157,7 @@ interface WorkbenchState {
   popDrill: () => void;
   toggleCollapse: (nodeId: string) => void;
   expandAll: () => void;
+  toggleExpandAll: () => void;
   setShowDiscarded: (show: boolean) => void;
   setShowParked: (show: boolean) => void;
   setFocusHideDimmed: (hide: boolean) => void;
@@ -174,6 +175,15 @@ interface WorkbenchState {
   setCommandPaletteOpen: (open: boolean) => void;
   setLayoutStats: (ms: number, cacheHit: boolean) => void;
   triggerFitView: () => void;
+}
+
+export function isAllExpanded(state: Pick<WorkbenchState,
+  "graph" | "view" | "collapsedByView" | "drillRoot" | "showDiscarded" | "showParked" | "focusHideDimmed"
+>): boolean {
+  if (!state.graph || state.drillRoot || !state.showDiscarded || !state.showParked ||
+      (state.view === "focus" && state.focusHideDimmed)) return false;
+  const containers = deriveGraph(state.graph).isContainer;
+  return !state.collapsedByView[state.view].some((id) => containers.has(id));
 }
 
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
@@ -906,6 +916,24 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
         fitViewNonce: state.fitViewNonce + 1
       };
     }),
+
+  toggleExpandAll: () => {
+    if (!isAllExpanded(get())) {
+      get().expandAll();
+      return;
+    }
+    set((state) => ({
+      collapsedByView: {
+        ...state.collapsedByView,
+        [state.view]: [...deriveGraph(state.graph!).isContainer]
+      },
+      drillRoot: null,
+      showDiscarded: false,
+      showParked: false,
+      fitViewTarget: null,
+      fitViewNonce: state.fitViewNonce + 1
+    }));
+  },
 
   setShowDiscarded: (show) => set({ showDiscarded: show }),
   setShowParked: (show) => set({ showParked: show }),

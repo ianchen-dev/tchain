@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDefaultCollapsed, projectGraph, type Graph, type ViewMode } from "@tchain/core";
-import { useWorkbenchStore } from "../src/store.js";
+import { isAllExpanded, useWorkbenchStore } from "../src/store.js";
 import { fetchGraphDetail, fetchPendingPatches } from "../src/api.js";
 
 vi.mock("../src/api.js", async (importOriginal) => ({
@@ -131,5 +131,55 @@ describe("expand all", () => {
     const before = useWorkbenchStore.getState();
     before.expandAll();
     expect(useWorkbenchStore.getState()).toBe(before);
+  });
+});
+
+
+describe("expand/collapse all toggle", () => {
+  it.each(views)("cycles and follows manual state in %s", (view) => {
+    const collapsedByView = { workspace: ["Done"], focus: ["Done"], report: ["Done"] };
+    useWorkbenchStore.setState({ graph, view, collapsedByView, drillRoot: "Done" });
+    const toggle = () => useWorkbenchStore.getState().toggleExpandAll();
+    const expanded = () => isAllExpanded(useWorkbenchStore.getState());
+    expect(expanded()).toBe(false);
+    toggle();
+    expect(expanded()).toBe(true);
+    const nonce = useWorkbenchStore.getState().fitViewNonce;
+    toggle();
+    let state = useWorkbenchStore.getState();
+    expect(expanded()).toBe(false);
+    expect(state.collapsedByView[view].sort()).toEqual(["Done", "Root"]);
+    expect(state.showDiscarded).toBe(false);
+    expect(state.showParked).toBe(false);
+    expect(state.drillRoot).toBeNull();
+    expect(state.fitViewTarget).toBeNull();
+    expect(state.fitViewNonce).toBe(nonce + 1);
+    for (const other of views.filter((v) => v !== view)) {
+      expect(state.collapsedByView[other]).toEqual(collapsedByView[other]);
+    }
+    state.toggleCollapse("Root");
+    state = useWorkbenchStore.getState();
+    const rendered = projectGraph(graph, { view, collapsed: state.collapsedByView[view] });
+    expect(rendered.nodes.find((n) => n.id === "Done")?.isCollapsed).toBe(true);
+    toggle();
+    expect(expanded()).toBe(true);
+    useWorkbenchStore.getState().toggleCollapse("Done");
+    expect(expanded()).toBe(false);
+    toggle();
+    expect(expanded()).toBe(true);
+    useWorkbenchStore.getState().drillInto("Done");
+    expect(expanded()).toBe(false);
+    toggle();
+    useWorkbenchStore.getState().setShowParked(false);
+    expect(expanded()).toBe(false);
+    toggle();
+    expect(expanded()).toBe(true);
+  });
+
+  it("does nothing without a graph", () => {
+    const before = useWorkbenchStore.getState();
+    before.toggleExpandAll();
+    expect(useWorkbenchStore.getState()).toBe(before);
+    expect(isAllExpanded(before)).toBe(false);
   });
 });
